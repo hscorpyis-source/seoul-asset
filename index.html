@@ -310,6 +310,7 @@ function showCustomAlert(msg, title = "알림") {
     confirmResolve = resolve;
   });
 }
+window.showCustomAlert = showCustomAlert;
 
 function showCustomConfirm(msg, title = "확인") {
   document.getElementById('alertTitle').textContent = title;
@@ -320,6 +321,7 @@ function showCustomConfirm(msg, title = "확인") {
     confirmResolve = resolve;
   });
 }
+window.showCustomConfirm = showCustomConfirm;
 
 function closeAlert(status) {
   document.getElementById('alertOv').style.display = 'none';
@@ -336,6 +338,7 @@ function showToast(m){
   toast.className = "show";
   setTimeout(() => { toast.className = toast.className.replace("show", ""); }, 3000);
 }
+window.showToast = showToast;
 
 function showMsg(m){
   const e=document.getElementById('sv');
@@ -543,17 +546,19 @@ function bFP(){
     h+=`<g class="mk" data-loc="${esc}" style="cursor:pointer"><circle cx="${p.x}" cy="${p.y}" r="15" fill="#22c55e" opacity=".15"/><circle cx="${p.x}" cy="${p.y}" r="10" fill="#22c55e" opacity=".92"/><text x="${p.x}" y="${p.y+3.5}" text-anchor="middle" fill="white" font-size="9" font-weight="700" pointer-events="none">${list.length}</text></g>`;
   }
   const svg=document.getElementById('fp');
-  svg.innerHTML=h;
-  svg.onclick=e=>{const g=e.target.closest('.mk');if(g)fltr(g.dataset.loc);};
-  svg.onmousemove=e=>{
-    const g=e.target.closest('.mk');
-    if(g){
-      document.getElementById('ttn').textContent=g.dataset.loc;
-      document.getElementById('tts').textContent=`자산 ${(grp[g.dataset.loc]||[]).length}개`;
-      const t=document.getElementById('tt');t.style.left=(e.clientX+14)+'px';t.style.top=(e.clientY-14)+'px';t.classList.add('show');
-    }else document.getElementById('tt').classList.remove('show');
-  };
-  svg.onmouseleave=()=>document.getElementById('tt').classList.remove('show');
+  if (svg) {
+    svg.innerHTML=h;
+    svg.onclick=e=>{const g=e.target.closest('.mk');if(g)fltr(g.dataset.loc);};
+    svg.onmousemove=e=>{
+      const g=e.target.closest('.mk');
+      if(g){
+        document.getElementById('ttn').textContent=g.dataset.loc;
+        document.getElementById('tts').textContent=`자산 ${(grp[g.dataset.loc]||[]).length}개`;
+        const t=document.getElementById('tt');t.style.left=(e.clientX+14)+'px';t.style.top=(e.clientY-14)+'px';t.classList.add('show');
+      }else document.getElementById('tt').classList.remove('show');
+    };
+    svg.onmouseleave=()=>document.getElementById('tt').classList.remove('show');
+  }
 }
 
 function rK(){
@@ -871,7 +876,8 @@ function exportXL(){
 }
 window.exportXL = exportXL;
 
-function importXL(input){
+// 엑셀 분석 및 Firestore 배치 삽입 고도화 (Promise.all 일괄 실행)
+async function importXL(input){
   const file=input.files[0];if(!file)return;
   const reader=new FileReader();
   reader.onload=async e=>{
@@ -883,13 +889,16 @@ function importXL(input){
         return;
       }
       let added=0,skip=0;
+      const promises = [];
+      
       for(const r of rows){
         const name=String(r['자산명']||'').trim();if(!name){skip++;continue;}
         const rawId=String(r['ID']||'').trim();
-        const newId=rawId&&!assets.find(a=>String(a.id)===rawId)?rawId:('AST-' + String(nid++).padStart(3, '0'));
+        let newId=rawId&&!assets.find(a=>String(a.id)===rawId)?rawId:('AST-' + String(nid++).padStart(3, '0'));
         
         while(assets.find(a=>String(a.id)===newId)){
           nid++;
+          newId = 'AST-' + String(nid).padStart(3, '0');
         }
 
         const loc=String(r['위치']||'업무공간1').trim();
@@ -897,7 +906,7 @@ function importXL(input){
         const stat=String(r['상태']||'사용중').trim();
         
         const assetDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'assets', newId);
-        await setDoc(assetDocRef, {
+        promises.push(setDoc(assetDocRef, {
           name,
           cat:VCAT.includes(cat)?cat:'기타',
           loc:VLOC.includes(loc)?loc:'업무공간1',
@@ -905,11 +914,17 @@ function importXL(input){
           asn:String(r['담당자']||'미배정').trim()||'미배정',
           stat:VSTAT.includes(stat)?stat:'사용중',
           note:String(r['비고']||'').trim()
-        });
+        }));
         added++;
       }
-      await addLog(added+'개 자산','일괄 등록됨','#22c55e');
-      await showCustomAlert(`${added}개 자산 등록 완료` + (skip ? ` (${skip}개 누락)` : ''), '가져오기 완료');
+      
+      if (promises.length > 0) {
+        await Promise.all(promises);
+        await addLog(added+'개 자산','일괄 등록됨','#22c55e');
+        await showCustomAlert(`${added}개 자산 등록 완료` + (skip ? ` (${skip}개 누락)` : ''), '가져오기 완료');
+      } else {
+        await showCustomAlert('유효한 자산 데이터가 없습니다.');
+      }
     }catch(err){
       await showCustomAlert('엑셀 분석 중 오류 발생: '+err.message);
     }
@@ -917,6 +932,7 @@ function importXL(input){
   };
   reader.readAsArrayBuffer(file);
 }
+window.importXL = importXL;
 
 function dlTpl(){
   const ws=XLSX.utils.aoa_to_sheet([['ID','자산명','카테고리','위치','부서','담당자','상태','비고'],['AST-001','복합기','기타','업무공간1','총무팀','홍길동','사용중','2층 프린터실'],['AST-002','소파 세트','가구','Conference Room A','PBU','김철수','유휴','']]);
@@ -953,10 +969,13 @@ async function initAuth() {
 window.onload = function() {
   initAuth();
   
-  // 엑셀 바인딩
-  document.getElementById('excelInput').addEventListener('change', function(e) {
-    importXL(e.target);
-  });
+  // 엑셀 바인딩 구조 개선
+  const exInput = document.getElementById('excelInput');
+  if (exInput) {
+    exInput.addEventListener('change', function(e) {
+      importXL(e.target);
+    });
+  }
 
   // 실시간 시계 연동
   (function tick(){
