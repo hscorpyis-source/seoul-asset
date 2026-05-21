@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>사무실 자산현황 대시보드</title>
+<title>서울사무소 자산현황 대시보드</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/3.19.0/iconfont/tabler-icons.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script type="module">
@@ -237,7 +237,31 @@ async function delSelected() {
   rAll();
 }
 
-function setSort(col) { if(sortCol===col) sortDir*=-1; else{sortCol=col;sortDir=1;} rT(); }
+function rSummary(rows) {
+  const bar = document.getElementById('summaryBar');
+  const q = document.getElementById('q').value.trim(), cat = document.getElementById('fC').value;
+  if (!rows.length || (!q && !cat)) { bar.style.display='none'; return; }
+  const allKw = {};
+  for (const c of VCAT) { const kws=KW_RULES[c]; if(kws) for (const kw of kws) allKw[kw]=CAT_C[c]||'#888'; }
+  const kwList = Object.keys(allKw).sort((a,b)=>b.length-a.length);
+  const counts = {};
+  for (const a of rows) {
+    let s=a.name; let matched=false;
+    for (const kw of kwList) {
+      const re=new RegExp(kw+'(\\d+)?','g'); let m;
+      while ((m=re.exec(s))!==null) { counts[kw]=counts[kw]||{n:0,c:allKw[kw]}; counts[kw].n+=(m[1]?parseInt(m[1]):1); matched=true; }
+      s=s.replace(new RegExp(kw+'\\d*','g'),'');
+    }
+    if (!matched) { const{label,qty}=parseAuto(a.name); counts[label]=counts[label]||{n:0,c:CAT_C[a.cat]||'#888'}; counts[label].n+=qty; }
+  }
+  const sorted=Object.entries(counts).filter(([,v])=>v.n>0).sort((a,b)=>b[1].n-a[1].n);
+  if (!sorted.length) { bar.style.display='none'; return; }
+  bar.style.display='flex';
+  bar.innerHTML=`<span style="font-size:11px;color:var(--m);white-space:nowrap;margin-right:2px">검색결과 요약</span>`
+    +sorted.map(([k,v])=>`<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;background:#fff;border:1px solid ${v.c}30;font-size:12px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:${v.c};flex-shrink:0"></span><span style="color:var(--t)">${k}</span><span style="font-weight:700;color:${v.c}">${v.n}</span></span>`).join('');
+}
+
+
 
 function rT() {
   let rows = getVisible();
@@ -251,6 +275,7 @@ function rT() {
     const k=th.dataset.key;
     th.innerHTML=th.dataset.label+(sortCol===k?(sortDir===1?' ▲':' ▼'):'<span style="opacity:.3"> ⇅</span>');
   });
+  rSummary(rows);
   const c=document.getElementById('cbAll'); if(c) c.checked=rows.every(a=>selIds.has(a._id));
   tb.innerHTML = rows.map(a=>`<tr class="${selIds.has(a._id)?'row-sel':''}" data-fid="${a._id}">
     <td><input type="checkbox" class="row-cb" ${selIds.has(a._id)?'checked':''} data-cb="${a._id}"></td>
