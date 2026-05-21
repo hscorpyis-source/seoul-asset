@@ -440,21 +440,34 @@ function rL(){
 }
 
 // ── 부서 상세 ─────────────────────────────────────────────────
-window.openDept=function(dept){
+let dpSortCol=null, dpSortDir=1, dpCurrentDept=null;
+
+function renderDeptBody(dept, sortCol, sortDir) {
   const list=assets.filter(a=>(a.dept||'미지정')===dept);
   const byP={};for(const a of list){const p=a.asn||'미배정';if(!byP[p])byP[p]=[];byP[p].push(a);}
-  document.getElementById('dpTitle').textContent=dept+' · 자산 현황';
-  document.getElementById('dpSub').textContent='총 '+list.length+'개 자산 · '+Object.keys(byP).length+'명';
-  document.getElementById('dpBody').innerHTML=Object.entries(byP).sort((a,b)=>b[1].length-a[1].length).map(([person,items])=>`
-    <div style="border:1px solid var(--bd);border-radius:8px;overflow:hidden;margin-bottom:10px">
+  const COLS=[
+    {key:'name',label:'자산명',w:'38%'},
+    {key:'cat',label:'카테고리',w:'13%'},
+    {key:'loc',label:'위치',w:'16%'},
+    {key:'stat',label:'상태',w:'14%'},
+    {key:'note',label:'비고',w:'19%'}
+  ];
+  return Object.entries(byP).sort((a,b)=>b[1].length-a[1].length).map(([person,items])=>{
+    let sorted=[...items];
+    if(sortCol) sorted.sort((a,b)=>String(a[sortCol]??'').localeCompare(String(b[sortCol]??''),'ko',{numeric:true})*sortDir);
+    return `<div style="border:1px solid var(--bd);border-radius:8px;overflow:hidden;margin-bottom:10px">
       <div style="background:#f4f6fa;padding:8px 13px;display:flex;align-items:center;justify-content:space-between">
         <span style="font-weight:600;font-size:13px">${person}</span>
         <span style="font-size:11px;color:var(--m);background:#fff;border:1px solid var(--bd);border-radius:12px;padding:1px 9px">${items.length}개</span>
       </div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">
-        <colgroup><col style="width:42%"><col style="width:13%"><col style="width:16%"><col style="width:14%"><col style="width:15%"></colgroup>
-        <thead><tr>${['자산명','카테고리','위치','상태','비고'].map(h=>`<th style="padding:6px 10px;text-align:left;color:var(--m);font-size:10px;border-bottom:1px solid var(--bd);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h}</th>`).join('')}</tr></thead>
-        <tbody>${items.map((a,i)=>`<tr style="background:${i%2?'#f9fafb':'#fff'}">
+        <colgroup>${COLS.map(c=>`<col style="width:${c.w}">`).join('')}</colgroup>
+        <thead><tr>${COLS.map(c=>{
+          const active=sortCol===c.key;
+          const arrow=active?(sortDir===1?' ▲':' ▼'):'<span style="opacity:.3"> ⇅</span>';
+          return `<th onclick="deptSort('${c.key}')" style="padding:6px 10px;text-align:left;color:${active?'#3b82f6':'var(--m)'};font-size:10px;border-bottom:1px solid var(--bd);white-space:nowrap;cursor:pointer;user-select:none;">${c.label}${arrow}</th>`;
+        }).join('')}</tr></thead>
+        <tbody>${sorted.map((a,i)=>`<tr style="background:${i%2?'#f9fafb':'#fff'}">
           <td style="padding:7px 10px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.name}">${a.name}</td>
           <td style="padding:7px 10px;color:${CAT_C[a.cat]||'#888'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.cat}</td>
           <td style="padding:7px 10px;color:var(--m);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.loc}">${a.loc}</td>
@@ -462,7 +475,22 @@ window.openDept=function(dept){
           <td style="padding:7px 10px;color:var(--m);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.note||''}">${a.note||'-'}</td>
         </tr>`).join('')}</tbody>
       </table>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+window.deptSort=function(col){
+  if(dpSortCol===col) dpSortDir*=-1; else{dpSortCol=col;dpSortDir=1;}
+  document.getElementById('dpBody').innerHTML=renderDeptBody(dpCurrentDept,dpSortCol,dpSortDir);
+};
+
+window.openDept=function(dept){
+  dpCurrentDept=dept; dpSortCol=null; dpSortDir=1;
+  const list=assets.filter(a=>(a.dept||'미지정')===dept);
+  const byP={};for(const a of list){const p=a.asn||'미배정';if(!byP[p])byP[p]=[];byP[p].push(a);}
+  document.getElementById('dpTitle').textContent=dept+' · 자산 현황';
+  document.getElementById('dpSub').textContent='총 '+list.length+'개 자산 · '+Object.keys(byP).length+'명';
+  document.getElementById('dpBody').innerHTML=renderDeptBody(dept,null,1);
   document.getElementById('dpOv').style.display='flex';
 };
 window.closeDept=function(){document.getElementById('dpOv').style.display='none';};
@@ -504,7 +532,7 @@ window.fltr=function(loc){document.getElementById('q').value=loc;document.getEle
 window.onSearch = function(v) {
   document.getElementById('q').value = v;
   rT();
-};  
+};
 window.clrF=function(){document.getElementById('q').value='';document.getElementById('fC').value='';clrSel();rT();};
 
 // ── 엑셀 ──────────────────────────────────────────────────────
