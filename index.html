@@ -12,14 +12,14 @@ import { getFirestore, collection, getDocs, addDoc, updateDoc, deleteDoc, doc, o
 
 // ✅ 기존 seoul-office-guide Firebase 설정키 붙여넣기
 const firebaseConfig = {
-   apiKey: "AIzaSyDX6QIgICbecDl68nb6i2Kd25Gz60ZPURo",
+  apiKey: "AIzaSyDX6QIgICbecDl68nb6i2Kd25Gz60ZPURo",
   authDomain: "seoul-asset.firebaseapp.com",
   projectId: "seoul-asset",
   storageBucket: "seoul-asset.firebasestorage.app",
   messagingSenderId: "579323655765",
   appId: "1:579323655765:web:455f884c47720675a846dc"
 };
-
+   
 const ADMIN_PASSWORD = "admin1234"; // ✅ 원하는 비밀번호로 변경
 
 const app = initializeApp(firebaseConfig);
@@ -467,6 +467,7 @@ function toggleAdmin() {
     isAdmin=false;
     document.getElementById('adminBadge').style.display='none';
     document.getElementById('adminArea').style.display='none';
+    document.getElementById('importBtn').style.display='none';
     document.getElementById('adminBtn').textContent='관리자';
     rT();
   } else {
@@ -481,6 +482,7 @@ window.doLogin = () => {
     document.getElementById('adminBadge').style.display='inline-block';
     document.getElementById('adminArea').style.display='flex';
     document.getElementById('adminBtn').textContent='로그아웃';
+    document.getElementById('importBtn').style.display='inline-flex';
     window._pw=''; document.getElementById('pwInp').value='';
     rT(); showMsg('관리자 로그인 ✓');
   } else {
