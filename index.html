@@ -3,24 +3,534 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>사무실 자산현황 대시보드 (Firebase 실시간 연동)</title>
+<title>사무실 자산현황 대시보드</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/3.19.0/iconfont/tabler-icons.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, getDocs, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ✅ 기존 seoul-office-guide Firebase 설정키 붙여넣기
+const firebaseConfig = {
+  apiKey: "AIzaSyDX6QIgICbecDl68nb6i2Kd25Gz60ZPURo",
+  authDomain: "seoul-asset.firebaseapp.com",
+  projectId: "seoul-asset",
+  storageBucket: "seoul-asset.firebasestorage.app",
+  messagingSenderId: "579323655765",
+  appId: "1:579323655765:web:455f884c47720675a846dc"
+};
+
+const ADMIN_PASSWORD = "admin1234"; // ✅ 원하는 비밀번호로 변경
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+// ── 상수 ──────────────────────────────────────────────────────
+const CAT_C = {'IT기기':'#3b82f6','가구':'#a855f7','기타':'#22c55e','렌탈':'#f97316'};
+const STAT_C = {'사용중':'#22c55e','유휴':'#eab308','상태불량':'#ef4444'};
+const KCAT = [
+  {cat:'IT기기',color:'#3b82f6'},
+  {cat:'가구',color:'#a855f7'},
+  {cat:'기타',color:'#22c55e'},
+  {cat:'렌탈',color:'#f97316'}
+];
+const VLOC = ['Executive Room A','Executive Room B','Executive Room C','Executive Room D','Executive Room E','Meeting Room A','Meeting Room B','Meeting Room C','Meeting Room D','Meeting Room E','Conference Room A','업무공간1','Conference Room B','업무공간2','업무공간3','VC'];
+const VCAT = ['IT기기','가구','기타','렌탈'];
+const VSTAT = ['사용중','유휴','상태불량'];
+const KW_RULES = {
+  'IT기기': ['데스크탑','모니터','노트북','TV'],
+  '가구':   ['임원용서랍장','임원용책상','임원용의자','회의용책상','회의용의자','원형테이블의자','원형테이블','모션데스크','5단장','서랍장','책상','의자'],
+};
+
+// ── 상태 ──────────────────────────────────────────────────────
+let assets = [], logs = [], nid = 1;
+let eid = null, selIds = new Set(), sortCol = null, sortDir = 1;
+let isAdmin = false, filterLoc = null;
+
+// ── Firebase CRUD ─────────────────────────────────────────────
+async function loadAssets() {
+  const snap = await getDocs(collection(db, "assets_seoul"));
+  assets = snap.docs.map(d => ({_id: d.id, ...d.data()}));
+  // nid 계산
+  const nums = assets.map(a => parseInt(a.id)).filter(n => !isNaN(n));
+  nid = nums.length ? Math.max(...nums) + 1 : 1;
+}
+
+async function loadLogs() {
+  const snap = await getDocs(query(collection(db, "asset_logs"), orderBy("ts","desc")));
+  logs = snap.docs.map(d => ({_id: d.id, ...d.data()}));
+}
+
+async function saveAsset(data, firestoreId) {
+  if (firestoreId) {
+    const {_id, ...rest} = data;
+    await updateDoc(doc(db, "assets_seoul", firestoreId), rest);
+  } else {
+    await addDoc(collection(db, "assets_seoul"), data);
+  }
+  await loadAssets();
+}
+
+async function deleteAsset(firestoreId) {
+  await deleteDoc(doc(db, "assets_seoul", firestoreId));
+  await loadAssets();
+}
+
+async function addLog(name, action, color) {
+  const ts = Date.now();
+  const t = new Date().toTimeString().slice(0,5);
+  await addDoc(collection(db, "asset_logs"), {n:name, a:action, c:color, t, ts});
+  await loadLogs();
+  rL();
+  showMsg('저장됨 ✓');
+}
+
+// ── 유틸 ──────────────────────────────────────────────────────
+function showMsg(m) {
+  const e = document.getElementById('sv');
+  e.textContent = m; e.style.opacity = 1;
+  setTimeout(() => e.style.opacity = 0, 2200);
+}
+
+function parseKw(name, keywords) {
+  const result = {}; let s = name;
+  for (const kw of keywords) {
+    const re = new RegExp(kw+'(\\d+)?','g'); let m;
+    while ((m = re.exec(s)) !== null) result[kw] = (result[kw]||0) + (m[1]?parseInt(m[1]):1);
+    s = s.replace(new RegExp(kw+'\\d*','g'),'');
+  }
+  return result;
+}
+
+function parseAuto(name) {
+  const t = (name||'').trim();
+  const m = t.match(/^(.*?)\s*(\d+)$/);
+  if (m && m[1].trim()) return {label:m[1].trim(), qty:parseInt(m[2])};
+  return {label:t, qty:1};
+}
+
+function sumKw(cat) {
+  const keywords = KW_RULES[cat];
+  const totals = {};
+  const list = assets.filter(x => x.cat === cat);
+  if (keywords) {
+    for (const a of list)
+      for (const [kw,cnt] of Object.entries(parseKw(a.name, keywords)))
+        totals[kw] = (totals[kw]||0) + cnt;
+  } else {
+    for (const a of list) {
+      const {label,qty} = parseAuto(a.name);
+      totals[label] = (totals[label]||0) + qty;
+    }
+  }
+  return totals;
+}
+
+function rAll() { rK(); bFP(); rT(); rC(); }
+
+// ── KPI ───────────────────────────────────────────────────────
+function rK() {
+  KCAT.forEach(({cat,color},i) => {
+    const lst = assets.filter(a => a.cat === cat);
+    document.getElementById('kv'+i).innerHTML = '총 '+lst.length+'건<span style="font-size:11px;font-weight:500;color:var(--m);margin-left:3px">(등록ID 기준)</span>';
+    const totals = sumKw(cat);
+    if (totals && Object.keys(totals).length) {
+      const sorted = Object.entries(totals).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+      document.getElementById('kb'+i).innerHTML = sorted.map(([k,v])=>
+        `<div class="kbr"><span class="kbn">${k}</span><span class="kbv" style="color:${color}">${v}개</span></div>`).join('');
+    } else {
+      document.getElementById('kb'+i).innerHTML = lst.length
+        ? `<span style="font-size:11px;color:var(--m);opacity:.6">등록된 자산 없음</span>`
+        : `<span style="font-size:11px;color:var(--m);opacity:.6">등록된 자산 없음</span>`;
+    }
+  });
+}
+
+// ── 플로어맵 ──────────────────────────────────────────────────
+const LPOS = {
+  'Executive Room A':{x:64,y:78},'Executive Room B':{x:151,y:178},'Executive Room C':{x:212,y:178},
+  'Executive Room D':{x:274,y:178},'Executive Room E':{x:336,y:178},'Meeting Room A':{x:150,y:78},
+  'Meeting Room B':{x:212,y:78},'Meeting Room C':{x:274,y:78},'Meeting Room D':{x:336,y:78},
+  'Meeting Room E':{x:842,y:68},'Conference Room A':{x:428,y:78},'Conference Room B':{x:428,y:178},
+  '업무공간1':{x:64,y:240},'업무공간2':{x:666,y:150},'업무공간3':{x:842,y:285},'VC':{x:64,y:288},
+};
+const FP_ZONES = [
+  {x:10,y:8,w:108,h:88,s:'#ef4444',tc:'#dc2626',ln:['Executive','Room A'],fs:8},
+  {x:121,y:8,w:59,h:88,s:'#3b82f6',tc:'#1d4ed8',ln:['Mtg.','Room A'],fs:7},
+  {x:183,y:8,w:59,h:88,s:'#3b82f6',tc:'#1d4ed8',ln:['Mtg.','Room B'],fs:7},
+  {x:245,y:8,w:59,h:88,s:'#3b82f6',tc:'#1d4ed8',ln:['Mtg.','Room C'],fs:7},
+  {x:307,y:8,w:59,h:88,s:'#3b82f6',tc:'#1d4ed8',ln:['Mtg.','Room D'],fs:7},
+  {x:369,y:8,w:118,h:88,s:'#22c55e',tc:'#15803d',ln:['Conference','Room A']},
+  {x:545,y:8,w:242,h:172,s:'#374151',tc:'#4b5563',ln:['업무공간2'],fs:12},
+  {x:792,y:8,w:100,h:75,s:'#3b82f6',tc:'#1d4ed8',ln:['Meeting','Room E']},
+  {x:10,y:99,w:108,h:160,s:'#374151',tc:'#4b5563',ln:['업무공간1'],fs:12},
+  {x:121,y:113,w:59,h:80,s:'#ef4444',tc:'#dc2626',ln:['Exec.','Room B'],fs:7},
+  {x:183,y:113,w:59,h:80,s:'#ef4444',tc:'#dc2626',ln:['Exec.','Room C'],fs:7},
+  {x:245,y:113,w:59,h:80,s:'#ef4444',tc:'#dc2626',ln:['Exec.','Room D'],fs:7},
+  {x:307,y:113,w:59,h:80,s:'#ef4444',tc:'#dc2626',ln:['Exec.','Room E'],fs:7},
+  {x:369,y:113,w:118,h:80,s:'#22c55e',tc:'#15803d',ln:['Conference','Room B']},
+  {x:792,y:185,w:100,h:118,s:'#374151',tc:'#4b5563',ln:['업무공간3'],fs:12},
+  {x:10,y:262,w:108,h:42,s:'#374151',tc:'#4b5563',ln:['VC'],fs:11},
+];
+
+function bFP() {
+  const grp = {};
+  for (const a of assets) { if (!grp[a.loc]) grp[a.loc]=[]; grp[a.loc].push(a); }
+  let h = `<rect width="900" height="310" rx="5" fill="#dde0e8"/>`;
+  for (const z of FP_ZONES) {
+    h += `<rect x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" rx="2" fill="#fff" stroke="${z.s}" stroke-width="2.2"/>`;
+    if (z.ln.length) {
+      const cx=z.x+z.w/2, cy=z.y+(z.h<60?z.h/2:18), fs=z.fs||8;
+      z.ln.forEach((l,i) => h+=`<text x="${cx}" y="${cy+i*(fs+3)+4}" text-anchor="middle" fill="${z.tc}" font-size="${fs}" font-family="Segoe UI,sans-serif">${l}</text>`);
+    }
+  }
+  h += `<polygon points="490,197 479,217 501,217" fill="#3b82f6" opacity=".9"/>`;
+  h += `<text x="490" y="230" text-anchor="middle" fill="#3b82f6" font-size="8" font-weight="600" font-family="Segoe UI,sans-serif">ENTRANCE</text>`;
+  const LEG=[{c:'#ef4444',l:'Executive Room'},{c:'#3b82f6',l:'Meeting Room'},{c:'#22c55e',l:'Conference Room'},{c:'#374151',l:'업무공간'}];
+  let lx=Math.round((900-LEG.length*118)/2);
+  for (const lm of LEG) {
+    h += `<rect x="${lx}" y="278" width="9" height="9" rx="1" fill="${lm.c}" opacity=".85"/>`;
+    h += `<text x="${lx+13}" y="286" fill="#555e77" font-size="8.5" font-family="Segoe UI,sans-serif">${lm.l}</text>`;
+    lx += 118;
+  }
+  for (const [loc,list] of Object.entries(grp)) {
+    const p = LPOS[loc]; if (!p) continue;
+    const esc = loc.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+    h += `<g class="mk" data-loc="${esc}" style="cursor:pointer"><circle cx="${p.x}" cy="${p.y}" r="15" fill="#22c55e" opacity=".15"/><circle cx="${p.x}" cy="${p.y}" r="10" fill="#22c55e" opacity=".92"/><text x="${p.x}" y="${p.y+3.5}" text-anchor="middle" fill="white" font-size="9" font-weight="700" pointer-events="none">${list.length}</text></g>`;
+  }
+  const svg = document.getElementById('fp'); svg.innerHTML = h;
+  svg.onclick = e => { const g=e.target.closest('.mk'); if(g) fltr(g.dataset.loc); };
+  svg.onmousemove = e => {
+    const g = e.target.closest('.mk');
+    if (g) {
+      document.getElementById('ttn').textContent = g.dataset.loc;
+      document.getElementById('tts').textContent = `자산 ${(grp[g.dataset.loc]||[]).length}개`;
+      const t=document.getElementById('tt'); t.style.left=(e.clientX+14)+'px'; t.style.top=(e.clientY-14)+'px'; t.classList.add('show');
+    } else document.getElementById('tt').classList.remove('show');
+  };
+  svg.onmouseleave = () => document.getElementById('tt').classList.remove('show');
+}
+
+// ── 테이블 ────────────────────────────────────────────────────
+function getVisible() {
+  const q = document.getElementById('q').value.toLowerCase();
+  const cat = document.getElementById('fC').value;
+  return assets.filter(a =>
+    (!q || [a.name,a.loc,a.dept,a.asn].some(v=>(v||'').toLowerCase().includes(q))) &&
+    (!cat || a.cat===cat)
+  );
+}
+
+function toggleAll(cb) { getVisible().forEach(a => cb.checked?selIds.add(a._id):selIds.delete(a._id)); document.querySelectorAll('.row-cb').forEach(b=>b.checked=cb.checked); updSel(); }
+function toggleSel(id, cb) { cb.checked?selIds.add(id):selIds.delete(id); updSel(); const v=getVisible(); const c=document.getElementById('cbAll'); if(c) c.checked=v.length>0&&v.every(a=>selIds.has(a._id)); }
+function updSel() { const b=document.getElementById('selBar'); selIds.size?(b.classList.add('show'),document.getElementById('selCnt').textContent=selIds.size+'개 선택됨'):b.classList.remove('show'); }
+function clrSel() { selIds.clear(); document.querySelectorAll('.row-cb').forEach(b=>b.checked=false); const c=document.getElementById('cbAll'); if(c) c.checked=false; updSel(); }
+
+async function delSelected() {
+  if (!selIds.size) return;
+  if (!confirm(selIds.size+'개 자산을 삭제하시겠습니까?')) return;
+  const cnt = selIds.size;
+  for (const fid of selIds) await deleteDoc(doc(db,"assets_seoul",fid));
+  selIds.clear();
+  await loadAssets();
+  await addLog(cnt+'개 자산','일괄 삭제됨','#ef4444');
+  rAll();
+}
+
+function setSort(col) { if(sortCol===col) sortDir*=-1; else{sortCol=col;sortDir=1;} rT(); }
+
+function rT() {
+  let rows = getVisible();
+  const tb = document.getElementById('tb');
+  if (!assets.length) { tb.innerHTML=`<tr><td colspan="10"><div class="es"><p>등록된 자산이 없습니다.</p></div></td></tr>`; return; }
+  if (!rows.length) { tb.innerHTML=`<tr><td colspan="10"><div class="es"><p>검색 결과가 없습니다</p></div></td></tr>`; return; }
+  if (sortCol) {
+    rows = [...rows].sort((a,b) => String(a[sortCol]??'').localeCompare(String(b[sortCol]??''),'ko',{numeric:true})*sortDir);
+  }
+  document.querySelectorAll('th.sortable').forEach(th => {
+    const k=th.dataset.key;
+    th.innerHTML=th.dataset.label+(sortCol===k?(sortDir===1?' ▲':' ▼'):'<span style="opacity:.3"> ⇅</span>');
+  });
+  const c=document.getElementById('cbAll'); if(c) c.checked=rows.every(a=>selIds.has(a._id));
+  tb.innerHTML = rows.map(a=>`<tr class="${selIds.has(a._id)?'row-sel':''}" data-fid="${a._id}">
+    <td><input type="checkbox" class="row-cb" ${selIds.has(a._id)?'checked':''} data-cb="${a._id}"></td>
+    <td style="color:var(--m);font-size:11px">${a.id||''}</td>
+    <td style="font-weight:500">${a.name}</td>
+    <td style="color:${CAT_C[a.cat]||'#888'};font-size:12px">${a.cat}</td>
+    <td style="color:var(--m);font-size:12px" title="${a.loc}">${a.loc}</td>
+    <td style="color:var(--m);font-size:12px">${a.dept||'미지정'}</td>
+    <td>${a.asn||'미배정'}</td>
+    <td><span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;color:${STAT_C[a.stat]||'#888'};background:${STAT_C[a.stat]||'#888'}1a">${a.stat||'사용중'}</span></td>
+    <td style="color:var(--m);font-size:12px" title="${a.note||''}">${a.note||'-'}</td>
+    <td>
+      ${isAdmin?`<button class="btn btn-e btn-sm" data-edit="${a._id}">수정</button><button class="btn btn-d btn-sm" style="margin-left:3px" data-del="${a._id}">삭제</button>`:'<span style="font-size:11px;color:var(--m)">읽기전용</span>'}
+    </td>
+  </tr>`).join('');
+
+  tb.onclick = function(e) {
+    const editBtn=e.target.closest('[data-edit]');
+    const delBtn=e.target.closest('[data-del]');
+    const cbEl=e.target.closest('[data-cb]');
+    if (editBtn) { openM(editBtn.dataset.edit); return; }
+    if (delBtn) { del(delBtn.dataset.del); return; }
+    if (cbEl) { toggleSel(cbEl.dataset.cb, cbEl); return; }
+  };
+}
+
+// ── 부서별 현황 ───────────────────────────────────────────────
+function rC() {
+  const tot=assets.length;
+  if (!tot) { document.getElementById('sc').innerHTML=`<div class="es">데이터 없음</div>`; return; }
+  const depts={};
+  for (const a of assets) { const d=a.dept||'미지정'; if(!depts[d]) depts[d]=new Set(); depts[d].add(a.asn||'미배정'); }
+  const maxP=Math.max(1,...Object.values(depts).map(s=>s.size));
+  const PIN={'공용':1,'예비':2};
+  const sortedDepts=Object.entries(depts).sort((a,b)=>{const pa=PIN[a[0]]||0,pb=PIN[b[0]]||0;if(pa||pb)return pa-pb;return b[1].size-a[1].size;});
+  document.getElementById('sc').innerHTML='<div class="bl">'+sortedDepts.map(([k,s])=>`
+    <div onclick="openDept('${k.replace(/'/g,"\\'")}')" style="cursor:pointer;border-radius:6px;padding:3px 4px;transition:background .15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background='transparent'">
+      <div class="br-lr"><span style="font-weight:500">${k}</span><span class="br-cnt">${s.size}명 ›</span></div>
+      <div class="br-tr"><div class="br-fi" style="width:${Math.round(s.size/maxP*100)}%;background:#3b82f6"></div></div>
+    </div>`).join('')+'</div>';
+}
+
+function rL() {
+  const el=document.getElementById('lg');
+  el.innerHTML=logs.length?logs.map(l=>`<div class="li"><div class="ld" style="background:${l.c}"></div><div class="lt"><b>${l.n}</b> ${l.a}</div><div class="ltm">${l.t}</div></div>`).join('')
+    :`<div class="es">변경 이력이 없습니다</div>`;
+}
+
+// ── 모달 ──────────────────────────────────────────────────────
+function openM(firestoreId=null) {
+  eid=firestoreId;
+  const a=firestoreId?assets.find(x=>x._id===firestoreId):null;
+  document.getElementById('mt').textContent=a?'자산 수정':'자산 추가';
+  document.getElementById('fn').value=a?.name??'';
+  document.getElementById('fid').value=a?.id??'';
+  document.getElementById('fc').value=a?.cat??'IT기기';
+  document.getElementById('fl').value=a?.loc??'업무공간1';
+  document.getElementById('fdept').value=a?.dept&&a.dept!=='미지정'?a.dept:'';
+  document.getElementById('fa').value=a?.asn&&a.asn!=='미배정'?a.asn:'';
+  document.getElementById('fstat').value=a?.stat??'사용중';
+  document.getElementById('fnote').value=a?.note??'';
+  document.getElementById('ov').style.display='flex';
+}
+function closeM() { document.getElementById('ov').style.display='none'; eid=null; }
+
+async function save() {
+  const name=document.getElementById('fn').value.trim();
+  if (!name) { alert('자산명을 입력해주세요.'); return; }
+  const data={
+    name, cat:document.getElementById('fc').value,
+    loc:document.getElementById('fl').value,
+    dept:document.getElementById('fdept').value.trim()||'미지정',
+    asn:document.getElementById('fa').value.trim()||'미배정',
+    stat:document.getElementById('fstat').value,
+    note:document.getElementById('fnote').value.trim()
+  };
+  if (eid) {
+    const rawId=document.getElementById('fid').value.trim();
+    if (rawId) data.id=rawId;
+    await updateDoc(doc(db,"assets_seoul",eid), data);
+    await loadAssets();
+    await addLog(name,'수정됨','#3b82f6');
+  } else {
+    const rawId=document.getElementById('fid').value.trim();
+    data.id=rawId||String(nid++);
+    await addDoc(collection(db,"assets_seoul"), data);
+    await loadAssets();
+    await addLog(name,'등록됨','#22c55e');
+  }
+  closeM(); rAll();
+}
+
+async function del(firestoreId) {
+  const a=assets.find(x=>x._id===firestoreId);
+  if (!a||!confirm(`"${a.name}"을(를) 삭제하시겠습니까?`)) return;
+  await deleteAsset(firestoreId);
+  selIds.delete(firestoreId); updSel();
+  await addLog(a.name,'삭제됨','#ef4444'); rAll();
+}
+
+function fltr(loc) { document.getElementById('q').value=loc; document.getElementById('fC').value=''; clrSel(); rT(); }
+function clrF() { document.getElementById('q').value=''; document.getElementById('fC').value=''; clrSel(); rT(); }
+
+// ── 부서 상세 ─────────────────────────────────────────────────
+function openDept(dept) {
+  const list=assets.filter(a=>(a.dept||'미지정')===dept);
+  const byP={};
+  for (const a of list) { const p=a.asn||'미배정'; if(!byP[p]) byP[p]=[]; byP[p].push(a); }
+  document.getElementById('dpTitle').textContent=dept+' · 자산 현황';
+  document.getElementById('dpSub').textContent='총 '+list.length+'개 자산 · '+Object.keys(byP).length+'명';
+  document.getElementById('dpBody').innerHTML=Object.entries(byP).sort((a,b)=>b[1].length-a[1].length).map(([person,items])=>`
+    <div style="border:1px solid var(--bd);border-radius:8px;overflow:hidden;margin-bottom:10px">
+      <div style="background:#f4f6fa;padding:8px 13px;display:flex;align-items:center;justify-content:space-between">
+        <span style="font-weight:600;font-size:13px">${person}</span>
+        <span style="font-size:11px;color:var(--m);background:#fff;border:1px solid var(--bd);border-radius:12px;padding:1px 9px">${items.length}개</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr>${['자산명','카테고리','위치','상태','비고'].map(h=>`<th style="padding:6px 10px;text-align:left;color:var(--m);font-size:10px;border-bottom:1px solid var(--bd)">${h}</th>`).join('')}</tr></thead>
+        <tbody>${items.map((a,i)=>`<tr style="background:${i%2?'#f9fafb':'#fff'}">
+          <td style="padding:7px 10px;font-weight:500">${a.name}</td>
+          <td style="padding:7px 10px;color:${CAT_C[a.cat]||'#888'}">${a.cat}</td>
+          <td style="padding:7px 10px;color:var(--m)">${a.loc}</td>
+          <td style="padding:7px 10px"><span style="padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;color:${STAT_C[a.stat]||'#888'};background:${STAT_C[a.stat]||'#888'}1a">${a.stat||'사용중'}</span></td>
+          <td style="padding:7px 10px;color:var(--m)">${a.note||'-'}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`).join('');
+  document.getElementById('dpOv').style.display='flex';
+}
+function closeDept() { document.getElementById('dpOv').style.display='none'; }
+
+// ── KPI 상세 ──────────────────────────────────────────────────
+function openKpi(i) {
+  const {cat,color}=KCAT[i];
+  const lst=assets.filter(a=>a.cat===cat);
+  if (!lst.length) return;
+  const totals=sumKw(cat);
+  const sorted=Object.entries(totals).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+  const max=sorted[0]?.[1]||1;
+  document.getElementById('dpTitle').textContent=cat+' · 자산 현황';
+  document.getElementById('dpSub').textContent='총 자산 '+lst.length+'개';
+  document.getElementById('dpBody').innerHTML=`
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;padding:4px 2px">
+      ${sorted.map(([name,cnt])=>`
+        <div style="background:#f8f9fb;border:1px solid var(--bd);border-radius:10px;padding:14px 16px">
+          <div style="font-size:12px;color:var(--m);margin-bottom:4px">${cat}</div>
+          <div style="font-size:14px;font-weight:700;color:var(--t);margin-bottom:6px">${name}</div>
+          <div style="font-size:30px;font-weight:800;color:${color};line-height:1;margin-bottom:8px">${cnt}<span style="font-size:13px;font-weight:500;margin-left:3px">개</span></div>
+          <div style="background:#e5e7eb;border-radius:4px;height:5px;overflow:hidden">
+            <div style="width:${Math.round(cnt/max*100)}%;height:100%;background:${color};border-radius:4px"></div>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  document.getElementById('dpOv').style.display='flex';
+}
+
+// ── 엑셀 ──────────────────────────────────────────────────────
+function exportXL() {
+  if (!assets.length) { alert('내보낼 자산 데이터가 없습니다.'); return; }
+  const ws=XLSX.utils.json_to_sheet(assets.map(a=>({'ID':a.id,'자산명':a.name,'카테고리':a.cat,'위치':a.loc,'부서':a.dept||'미지정','담당자':a.asn,'상태':a.stat||'사용중','비고':a.note||''})));
+  ws['!cols']=[{wch:12},{wch:24},{wch:12},{wch:22},{wch:14},{wch:14},{wch:10},{wch:24}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'자산현황');
+  XLSX.writeFile(wb,'자산현황_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  addLog(assets.length+'개 자산','엑셀 내보내기','#3b82f6');
+}
+
+async function importXL(input) {
+  const file=input.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=async e=>{
+    try {
+      const wb=XLSX.read(e.target.result,{type:'array'});
+      const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});
+      if (!rows.length) { alert('데이터가 없습니다.'); return; }
+      let added=0,skip=0;
+      for (const r of rows) {
+        const name=String(r['자산명']||'').trim(); if(!name){skip++;continue;}
+        const rawId=String(r['ID']||'').trim();
+        const id=rawId&&!assets.find(a=>String(a.id)===rawId)?rawId:String(nid++);
+        const loc=String(r['위치']||'업무공간1').trim();
+        const cat=String(r['카테고리']||'기타').trim();
+        const stat=String(r['상태']||'사용중').trim();
+        await addDoc(collection(db,"assets_seoul"),{
+          id, name,
+          cat:VCAT.includes(cat)?cat:'기타',
+          loc:VLOC.includes(loc)?loc:'업무공간1',
+          dept:String(r['부서']||'미지정').trim()||'미지정',
+          asn:String(r['담당자']||'미배정').trim()||'미배정',
+          stat:VSTAT.includes(stat)?stat:'사용중',
+          note:String(r['비고']||'').trim()
+        });
+        added++;
+      }
+      await loadAssets();
+      await addLog(added+'개 자산','일괄 등록됨','#22c55e');
+      rAll();
+      alert('✅ '+added+'개 자산 등록 완료'+(skip?'\n⚠️ '+skip+'개 건너뜀':''));
+    } catch(err) { alert('파일 오류: '+err.message); }
+    input.value='';
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function dlTpl() {
+  const ws=XLSX.utils.aoa_to_sheet([['ID','자산명','카테고리','위치','부서','담당자','상태','비고'],['A-001','복합기','기타','업무공간1','총무팀','홍길동','사용중','2층 프린터실']]);
+  ws['!cols']=[{wch:12},{wch:22},{wch:12},{wch:28},{wch:14},{wch:14},{wch:10},{wch:24}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'자산현황');
+  XLSX.writeFile(wb,'자산현황_템플릿.xlsx');
+}
+
+// ── 관리자 로그인 ─────────────────────────────────────────────
+function toggleAdmin() {
+  if (isAdmin) {
+    isAdmin=false;
+    document.getElementById('adminBadge').style.display='none';
+    document.getElementById('adminArea').style.display='none';
+    document.getElementById('adminBtn').textContent='관리자';
+    rT();
+  } else {
+    document.getElementById('loginOv').style.display='flex';
+  }
+}
+window.setPwInput = v => { window._pw=v; };
+window.doLogin = () => {
+  if ((window._pw||'') === ADMIN_PASSWORD) {
+    isAdmin=true;
+    document.getElementById('loginOv').style.display='none';
+    document.getElementById('adminBadge').style.display='inline-block';
+    document.getElementById('adminArea').style.display='flex';
+    document.getElementById('adminBtn').textContent='로그아웃';
+    window._pw=''; document.getElementById('pwInp').value='';
+    rT(); showMsg('관리자 로그인 ✓');
+  } else {
+    document.getElementById('pwErr').style.display='block';
+  }
+};
+window.closeLogin = () => {
+  document.getElementById('loginOv').style.display='none';
+  window._pw=''; document.getElementById('pwInp').value='';
+  document.getElementById('pwErr').style.display='none';
+};
+
+// ── 시계 ──────────────────────────────────────────────────────
+(function tick(){
+  const n=new Date();
+  document.getElementById('clk').textContent=n.toTimeString().slice(0,8);
+  document.getElementById('dt').textContent=n.toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'short'});
+  setTimeout(tick,1000);
+})();
+
+// ── 전역 바인딩 ───────────────────────────────────────────────
+window.openM=openM; window.closeM=closeM; window.save=save; window.del=del;
+window.toggleAll=toggleAll; window.toggleSel=toggleSel; window.clrSel=clrSel;
+window.delSelected=delSelected; window.setSort=setSort; window.clrF=clrF; window.fltr=fltr;
+window.openDept=openDept; window.closeDept=closeDept; window.openKpi=openKpi;
+window.exportXL=exportXL; window.importXL=importXL; window.dlTpl=dlTpl;
+window.toggleAdmin=toggleAdmin;
+
+// ── 초기화 ────────────────────────────────────────────────────
+async function init() {
+  document.getElementById('tb').innerHTML=`<tr><td colspan="10" style="text-align:center;padding:20px;color:#888;">불러오는 중...</td></tr>`;
+  await loadAssets();
+  await loadLogs();
+  rAll(); rL();
+  showMsg('불러오기 완료 ✓');
+}
+init();
+</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#f4f6fa;--card:#fff;--bd:#e2e6ef;--t:#1a1d2e;--m:#6b7280;--acc:#3b82f6;--gr:#22c55e;--re:#ef4444}
-body{background:var(--bg);color:var(--t);font-family:var(--font-sans,'Segoe UI',sans-serif);font-size:14px}
+body{background:var(--bg);color:var(--t);font-family:'Segoe UI',sans-serif;font-size:14px}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
 .hdr{padding:12px 18px;background:#fff;border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between}
-.hdr h1{font-size:16px;font-weight:500;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;transition:opacity .15s}
-.hdr h1:hover{opacity:.75}
+.hdr h1{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px}
 .hdr .sub{font-size:11px;color:var(--m);margin-top:2px}
 .hdr-r{text-align:right}
-.clk{font-size:14px;font-weight:500;color:var(--acc);font-variant-numeric:tabular-nums}
+.clk{font-size:14px;font-weight:500;color:var(--acc)}
 .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:12px 18px}
-@media (max-width: 768px) {
-  .kpi-row { grid-template-columns: repeat(2, 1fr); }
-  .main { grid-template-columns: 1fr !important; }
-}
-.kpi{background:#fff;border:1px solid var(--bd);border-radius:10px;padding:10px 14px;min-height:75px;display:flex;flex-direction:column}
+.kpi{background:#fff;border:1px solid var(--bd);border-radius:10px;padding:10px 14px;min-height:75px;display:flex;flex-direction:column;cursor:pointer}
 .k-lbl{font-size:10px;color:var(--m);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
 .k-val{font-size:22px;font-weight:700;margin-bottom:8px;white-space:nowrap}
 .k-sep{height:1px;background:var(--bd);margin-bottom:8px}
@@ -31,10 +541,10 @@ body{background:var(--bg);color:var(--t);font-family:var(--font-sans,'Segoe UI',
 .main{display:grid;grid-template-columns:1fr 272px;gap:8px;padding:0 18px 18px}
 .col-l,.col-r{display:flex;flex-direction:column;gap:8px}
 .card{background:#fff;border:1px solid var(--bd);border-radius:10px;padding:14px}
-.ct{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px}
+.ct{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px;flex-wrap:wrap;gap:6px}
 .ct-t{font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px}
 .btn{padding:6px 12px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:500;transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
-.btn:hover{opacity:.85;transform:translateY(-1px)}
+.btn:hover{opacity:.85}
 .btn-p{background:var(--acc);color:#fff}
 .btn-sm{padding:4px 10px;font-size:12px}
 .btn-e{background:rgba(59,130,246,.1);color:var(--acc)}
@@ -43,7 +553,7 @@ body{background:var(--bg);color:var(--t);font-family:var(--font-sans,'Segoe UI',
 .file-btn{padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;background:rgba(34,197,94,.1);color:#15803d;border:1px solid rgba(34,197,94,.25);display:inline-flex;align-items:center;gap:5px}
 .file-btn input{display:none}
 .tb,.tb2{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center}
-input[type=text].sb{flex:1;min-width:130px;background:#f8f9fb;border:1px solid var(--bd);color:var(--t);padding:6px 10px;border-radius:6px;font-size:13px;outline:none;transition:border-color .2s}
+input[type=text].sb{flex:1;min-width:130px;background:#f8f9fb;border:1px solid var(--bd);color:var(--t);padding:6px 10px;border-radius:6px;font-size:13px;outline:none}
 input[type=text].sb:focus{border-color:var(--acc)}
 select.fs{background:#f8f9fb;border:1px solid var(--bd);color:var(--t);padding:6px 9px;border-radius:6px;font-size:13px;cursor:pointer;outline:none}
 .sel-bar{display:none;align-items:center;gap:10px;padding:8px 13px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;margin-bottom:8px}
@@ -54,15 +564,15 @@ table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
 th{padding:7px 8px;text-align:left;color:var(--m);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--bd);white-space:nowrap}
 td{padding:7px 8px;border-bottom:1px solid #f0f2f7;vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 th:nth-child(1),td:nth-child(1){width:32px;text-align:center;padding:7px 4px}
-th:nth-child(2),td:nth-child(2){width:50px}
+th:nth-child(2),td:nth-child(2){width:38px}
 th:nth-child(3),td:nth-child(3){width:150px}
-th:nth-child(4),td:nth-child(4){width:80px}
-th:nth-child(5),td:nth-child(5){width:110px}
-th:nth-child(6),td:nth-child(6){width:90px}
+th:nth-child(4),td:nth-child(4){width:66px}
+th:nth-child(5),td:nth-child(5){width:100px}
+th:nth-child(6),td:nth-child(6){width:84px}
 th:nth-child(7),td:nth-child(7){width:90px}
-th:nth-child(8),td:nth-child(8){width:80px}
-th:nth-child(9),td:nth-child(9){width:100px}
-th:nth-child(10),td:nth-child(10){width:110px}
+th:nth-child(8),td:nth-child(8){width:74px}
+th:nth-child(9),td:nth-child(9){width:80px}
+th:nth-child(10),td:nth-child(10){width:90px}
 tbody tr:hover td{background:#f8f9fb}
 tbody tr.row-sel td{background:rgba(59,130,246,.05)!important}
 input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--acc);display:block;margin:0 auto}
@@ -70,19 +580,19 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
 .br-lr{display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px}
 .br-cnt{color:var(--m)}
 .br-tr{background:#f0f2f7;border-radius:4px;height:6px;overflow:hidden}
-.br-fi{height:100%;border-radius:4px;transition:width .6s cubic-bezier(.4,0,.2,1)}
+.br-fi{height:100%;border-radius:4px;transition:width .6s}
 .ll{display:flex;flex-direction:column;gap:8px;max-height:160px;overflow-y:auto}
 .li{display:flex;gap:8px;align-items:flex-start}
 .ld{width:6px;height:6px;border-radius:50%;margin-top:4px;flex-shrink:0}
 .lt{font-size:11px;color:var(--m);flex:1;line-height:1.4}.lt b{color:var(--t)}
 .ltm{font-size:10px;color:var(--m);white-space:nowrap}
 .ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center}
-.mdl{background:#fff;border:1px solid var(--bd);border-radius:13px;padding:22px;width:520px;max-width:96vw;max-height:90vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.2)}
-.mdl h2{font-size:15px;font-weight:500;margin-bottom:18px}
+.mdl{background:#fff;border-radius:13px;padding:22px;width:520px;max-width:96vw;max-height:90vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.2)}
+.mdl h2{font-size:15px;font-weight:600;margin-bottom:18px}
 .fg{display:grid;grid-template-columns:1fr 1fr;gap:11px}
 .fi{display:flex;flex-direction:column;gap:4px}.fi.sp{grid-column:1/-1}
 .fi label{font-size:10px;color:var(--m);text-transform:uppercase;letter-spacing:.4px}
-.fi input,.fi select{background:#f8f9fb;border:1px solid var(--bd);color:var(--t);padding:7px 10px;border-radius:7px;font-size:13px;outline:none;width:100%;transition:border-color .2s}
+.fi input,.fi select{background:#f8f9fb;border:1px solid var(--bd);color:var(--t);padding:7px 10px;border-radius:7px;font-size:13px;outline:none;width:100%}
 .fi input:focus,.fi select:focus{border-color:var(--acc)}
 .mf{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 .tt{display:none;position:fixed;background:#fff;border:1px solid var(--bd);border-radius:8px;padding:9px 13px;z-index:300;pointer-events:none;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.1)}
@@ -90,78 +600,56 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
 .es{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px 16px;color:var(--m);gap:8px;font-size:13px}
 ::-webkit-scrollbar{width:3px;height:3px}
 ::-webkit-scrollbar-thumb{background:var(--bd);border-radius:2px}
-
-/* 커스텀 토스트 알림 추가 */
-#toast {
-  visibility: hidden;
-  min-width: 250px;
-  background-color: #333;
-  color: #fff;
-  text-align: center;
-  border-radius: 8px;
-  padding: 12px 16px;
-  position: fixed;
-  z-index: 10005;
-  left: 50%;
-  bottom: 30px;
-  transform: translateX(-50%);
-  font-size: 13px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-}
-#toast.show {
-  visibility: visible;
-  -webkit-animation: fadein 0.5s, fadeout 0.5s 2.5s;
-  animation: fadein 0.5s, fadeout 0.5s 2.5s;
-}
-@-webkit-keyframes fadein { from {bottom: 0; opacity: 0;} to {bottom: 30px; opacity: 1;} }
-@keyframes fadein { from {bottom: 0; opacity: 0;} to {bottom: 30px; opacity: 1;} }
-@-webkit-keyframes fadeout { from {bottom: 30px; opacity: 1;} to {bottom: 0; opacity: 0;} }
-@keyframes fadeout { from {bottom: 30px; opacity: 1;} to {bottom: 0; opacity: 0;} }
 </style>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/3.19.0/iconfont/tabler-icons.min.css">
 </head>
 <body>
 <h2 class="sr-only">사무실 자산현황 대시보드</h2>
 
 <div class="hdr">
   <div>
-    <h1 id="siteTitle" onclick="editTitle()" title="클릭하면 제목 수정"><i class="ti ti-building"></i> <span id="titleText">사무실 자산현황 대시보드</span></h1>
-    <div class="sub">Office Asset Management System · 실시간 클라우드 동기화 &nbsp;<span id="sv" style="font-size:11px;color:var(--gr);transition:opacity 1s;opacity:0"></span></div>
+    <h1><i class="ti ti-building"></i> 서울사무소 자산현황</h1>
+    <div class="sub">Office Asset Management · Firebase 실시간 동기화 &nbsp;<span id="sv" style="font-size:11px;color:var(--gr);transition:opacity 1s;opacity:0"></span></div>
   </div>
-  <div class="hdr-r">
-    <div class="clk" id="clk">--:--:--</div>
-    <div style="font-size:11px;color:var(--m);margin-top:2px" id="userStatus">인증 중...</div>
-    <div style="font-size:10px;color:var(--m);margin-top:2px" id="dt"></div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <span id="adminBadge" style="display:none;font-size:12px;background:#E6F1FB;color:#185FA5;padding:3px 10px;border-radius:20px;font-weight:700;">관리자 모드</span>
+    <button id="adminBtn" onclick="toggleAdmin()" class="btn btn-c btn-sm">관리자</button>
+    <div class="hdr-r">
+      <div class="clk" id="clk">--:--:--</div>
+      <div style="font-size:11px;color:var(--m);margin-top:2px" id="dt"></div>
+    </div>
   </div>
 </div>
 
 <div class="kpi-row">
-  <div class="kpi" style="border-top:3px solid #3b82f6;cursor:pointer" onclick="openKpi(0)" title="클릭하면 상세 현황"><div class="k-lbl">IT기기</div><div class="k-val" id="kv0" style="color:#3b82f6">총 0건</div><div class="k-sep"></div><div class="k-breakdown" id="kb0"><span style="font-size:11px;color:var(--m);opacity:.6">등록된 자산 없음</span></div></div>
-  <div class="kpi" style="border-top:3px solid #a855f7;cursor:pointer" onclick="openKpi(1)" title="클릭하면 상세 현황"><div class="k-lbl">가구</div><div class="k-val" id="kv1" style="color:#a855f7">총 0건</div><div class="k-sep"></div><div class="k-breakdown" id="kb1"><span style="font-size:11px;color:var(--m);opacity:.6">등록된 자산 없음</span></div></div>
-  <div class="kpi" style="border-top:3px solid #22c55e;cursor:pointer" onclick="openKpi(2)" title="클릭하면 상세 현황"><div class="k-lbl">기타</div><div class="k-val" id="kv2" style="color:#22c55e">총 0건</div><div class="k-sep"></div><div class="k-breakdown" id="kb2"><span style="font-size:11px;color:var(--m);opacity:.6">등록된 자산 없음</span></div></div>
-  <div class="kpi" style="border-top:3px solid #f97316;cursor:pointer" onclick="openKpi(3)" title="클릭하면 상세 현황"><div class="k-lbl">렌탈</div><div class="k-val" id="kv3" style="color:#f97316">총 0건</div><div class="k-sep"></div><div class="k-breakdown" id="kb3"><span style="font-size:11px;color:var(--m);opacity:.6">등록된 자산 없음</span></div></div>
+  <div class="kpi" style="border-top:3px solid #3b82f6" onclick="openKpi(0)"><div class="k-lbl">IT기기</div><div class="k-val" id="kv0" style="color:#3b82f6">총 0건</div><div class="k-sep"></div><div class="k-breakdown" id="kb0"></div></div>
+  <div class="kpi" style="border-top:3px solid #a855f7" onclick="openKpi(1)"><div class="k-lbl">가구</div><div class="k-val" id="kv1" style="color:#a855f7">총 0건</div><div class="k-sep"></div><div class="k-breakdown" id="kb1"></div></div>
+  <div class="kpi" style="border-top:3px solid #22c55e" onclick="openKpi(2)"><div class="k-lbl">기타</div><div class="k-val" id="kv2" style="color:#22c55e">총 0건</div><div class="k-sep"></div><div class="k-breakdown" id="kb2"></div></div>
+  <div class="kpi" style="border-top:3px solid #f97316" onclick="openKpi(3)"><div class="k-lbl">렌탈</div><div class="k-val" id="kv3" style="color:#f97316">총 0건</div><div class="k-sep"></div><div class="k-breakdown" id="kb3"></div></div>
 </div>
 
 <div class="main">
   <div class="col-l">
     <div class="card">
-      <div class="ct"><span class="ct-t"><i class="ti ti-layout"></i> 오피스 레이아웃 맵</span><span style="font-size:11px;color:var(--m)">마커 클릭 → 해당 위치 자산 필터</span></div>
+      <div class="ct"><span class="ct-t"><i class="ti ti-layout"></i> 오피스 레이아웃 맵</span><span style="font-size:11px;color:var(--m)">마커 클릭 → 위치 필터</span></div>
       <svg id="fp" viewBox="0 0 900 310" style="width:100%;display:block;border-radius:6px" xmlns="http://www.w3.org/2000/svg"></svg>
     </div>
     <div class="card">
-      <div class="ct"><span class="ct-t"><i class="ti ti-list"></i> 자산 목록</span><button class="btn btn-p btn-sm" onclick="openM()"><i class="ti ti-plus"></i> 자산 추가</button></div>
+      <div class="ct">
+        <span class="ct-t"><i class="ti ti-list"></i> 자산 목록</span>
+        <div id="adminArea" style="display:none;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-p btn-sm" onclick="openM()"><i class="ti ti-plus"></i> 자산 추가</button>
+        </div>
+      </div>
       <div class="tb">
         <input class="sb" id="q" type="text" placeholder="자산명, 위치, 부서, 담당자 검색..." oninput="rT()">
         <select class="fs" id="fC" onchange="rT()"><option value="">전체 카테고리</option><option>IT기기</option><option>가구</option><option>기타</option><option>렌탈</option></select>
-        <button class="btn btn-c btn-sm" onclick="clrF()" title="필터 초기화"><i class="ti ti-refresh"></i></button>
+        <button class="btn btn-c btn-sm" onclick="clrF()"><i class="ti ti-refresh"></i></button>
       </div>
       <div class="tb2">
-        <label class="file-btn"><i class="ti ti-upload"></i> 엑셀 가져오기<input type="file" accept=".xlsx,.xls" id="excelInput"></label>
         <button class="btn btn-sm" style="background:rgba(234,179,8,.1);color:#92400e;border:1px solid rgba(234,179,8,.25)" onclick="exportXL()"><i class="ti ti-download"></i> 엑셀 내보내기</button>
-        <button class="btn btn-c btn-sm" onclick="dlTpl()"><i class="ti ti-file-spreadsheet"></i> 템플릿 다운로드</button>
-        <button class="btn btn-sm" style="background:rgba(168,85,247,.1);color:#7e22ce;border:1px solid rgba(168,85,247,.25)" onclick="saveAsHTML()"><i class="ti ti-device-floppy"></i> 현재 상태 저장 (HTML)</button>
+        <button class="btn btn-c btn-sm" onclick="dlTpl()"><i class="ti ti-file-spreadsheet"></i> 템플릿</button>
+        <label id="importBtn" class="file-btn" style="display:none"><i class="ti ti-upload"></i> 엑셀 가져오기<input type="file" accept=".xlsx,.xls" onchange="importXL(this)"></label>
       </div>
-      <div id="summaryBar" style="display:none;flex-wrap:wrap;gap:6px;margin-bottom:8px;padding:9px 12px;background:#f4f6fa;border:1px solid var(--bd);border-radius:8px;align-items:center"></div>
       <div class="sel-bar" id="selBar">
         <span class="sel-cnt" id="selCnt">0개 선택됨</span>
         <button class="btn btn-d btn-sm" onclick="delSelected()"><i class="ti ti-trash"></i> 선택 삭제</button>
@@ -171,14 +659,14 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
         <table>
           <thead><tr>
             <th><input type="checkbox" id="cbAll" onchange="toggleAll(this)"></th>
-            <th class="sortable" data-key="id" data-label="ID" onclick="setSort('id')" style="cursor:pointer;user-select:none">ID<span style="opacity:.3"> ⇅</span></th>
-            <th class="sortable" data-key="name" data-label="자산명" onclick="setSort('name')" style="cursor:pointer;user-select:none">자산명<span style="opacity:.3"> ⇅</span></th>
-            <th class="sortable" data-key="cat" data-label="카테고리" onclick="setSort('cat')" style="cursor:pointer;user-select:none">카테고리<span style="opacity:.3"> ⇅</span></th>
-            <th class="sortable" data-key="loc" data-label="위치" onclick="setSort('loc')" style="cursor:pointer;user-select:none">위치<span style="opacity:.3"> ⇅</span></th>
-            <th class="sortable" data-key="dept" data-label="부서" onclick="setSort('dept')" style="cursor:pointer;user-select:none">부서<span style="opacity:.3"> ⇅</span></th>
-            <th class="sortable" data-key="asn" data-label="담당자" onclick="setSort('asn')" style="cursor:pointer;user-select:none">담당자<span style="opacity:.3"> ⇅</span></th>
-            <th class="sortable" data-key="stat" data-label="상태" onclick="setSort('stat')" style="cursor:pointer;user-select:none">상태<span style="opacity:.3"> ⇅</span></th>
-            <th class="sortable" data-key="note" data-label="비고" onclick="setSort('note')" style="cursor:pointer;user-select:none">비고<span style="opacity:.3"> ⇅</span></th>
+            <th class="sortable" data-key="id" data-label="ID" onclick="setSort('id')" style="cursor:pointer">ID</th>
+            <th class="sortable" data-key="name" data-label="자산명" onclick="setSort('name')" style="cursor:pointer">자산명</th>
+            <th class="sortable" data-key="cat" data-label="카테고리" onclick="setSort('cat')" style="cursor:pointer">카테고리</th>
+            <th class="sortable" data-key="loc" data-label="위치" onclick="setSort('loc')" style="cursor:pointer">위치</th>
+            <th class="sortable" data-key="dept" data-label="부서" onclick="setSort('dept')" style="cursor:pointer">부서</th>
+            <th class="sortable" data-key="asn" data-label="담당자" onclick="setSort('asn')" style="cursor:pointer">담당자</th>
+            <th class="sortable" data-key="stat" data-label="상태" onclick="setSort('stat')" style="cursor:pointer">상태</th>
+            <th data-label="비고">비고</th>
             <th>관리</th>
           </tr></thead>
           <tbody id="tb"></tbody>
@@ -204,16 +692,15 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
         <select id="fl">
           <option>Executive Room A</option><option>Executive Room B</option>
           <option>Executive Room C</option><option>Executive Room D</option>
-          <option>Executive Room E</option>
-          <option>Meeting Room A</option><option>Meeting Room B</option>
-          <option>Meeting Room C</option><option>Meeting Room D</option>
-          <option>Meeting Room E</option>
+          <option>Executive Room E</option><option>Meeting Room A</option>
+          <option>Meeting Room B</option><option>Meeting Room C</option>
+          <option>Meeting Room D</option><option>Meeting Room E</option>
           <option>Conference Room A</option><option>업무공간1</option>
           <option>Conference Room B</option><option>업무공간2</option>
           <option>업무공간3</option><option>VC</option>
         </select>
       </div>
-      <div class="fi"><label>부서</label><input type="text" id="fdept" placeholder="예: 총무팀, PBU"></div>
+      <div class="fi"><label>부서</label><input type="text" id="fdept" placeholder="예: 총무팀"></div>
       <div class="fi"><label>담당자</label><input type="text" id="fa" placeholder="예: 홍길동"></div>
       <div class="fi"><label>상태</label><select id="fstat"><option>사용중</option><option>유휴</option><option>상태불량</option></select></div>
       <div class="fi sp"><label>비고</label><input type="text" id="fnote" placeholder="자유롭게 입력하세요"></div>
@@ -225,26 +712,31 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
   </div>
 </div>
 
-<!-- 부서 상세 팝업 -->
+<!-- 부서/KPI 상세 팝업 -->
 <div id="dpOv" onclick="if(event.target===this)closeDept()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center;padding:20px;overflow:auto">
   <div style="background:#fff;border-radius:13px;padding:22px;width:620px;max-width:96vw;max-height:calc(100vh - 40px);display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.2);overflow:hidden">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px">
       <div><div id="dpTitle" style="font-size:15px;font-weight:600"></div><div id="dpSub" style="font-size:12px;color:var(--m);margin-top:3px"></div></div>
-      <button onclick="closeDept()" style="background:none;border:none;cursor:pointer;font-size:18px;color:var(--m);padding:2px 6px">✕</button>
+      <button onclick="closeDept()" style="background:none;border:none;cursor:pointer;font-size:18px;color:var(--m)">✕</button>
     </div>
-    <div id="dpBody" style="overflow-y:auto;flex:1;min-height:0;padding-right:4px"></div>
+    <div id="dpBody" style="overflow-y:auto;flex:1;min-height:0"></div>
   </div>
 </div>
 
-<!-- 커스텀 알림/확인 모달 -->
-<div class="ov" id="alertOv" onclick="if(event.target===this)closeAlert(false)">
-  <div class="mdl" style="width:380px">
-    <h2 id="alertTitle">알림</h2>
-    <p id="alertMsg" style="margin-bottom:18px;color:var(--m);line-height:1.5"></p>
-    <div class="mf" id="alertBtns">
-      <button class="btn btn-c" id="alertCancelBtn" onclick="closeAlert(false)">취소</button>
-      <button class="btn btn-p" id="alertOkBtn" onclick="closeAlert(true)">확인</button>
+<!-- 관리자 로그인 -->
+<div id="loginOv" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:13px;padding:22px;width:320px;box-shadow:0 12px 40px rgba(0,0,0,.2)">
+    <h2 style="font-size:15px;font-weight:700;margin-bottom:16px">관리자 로그인</h2>
+    <input id="pwInp" type="password" placeholder="비밀번호 입력"
+      oninput="setPwInput(this.value)"
+      onkeydown="if(event.key==='Enter')doLogin()"
+      style="width:100%;padding:8px 10px;border:1px solid var(--bd);border-radius:8px;font-size:14px;box-sizing:border-box;margin-bottom:6px;outline:none">
+    <p id="pwErr" style="display:none;color:#ef4444;font-size:13px;margin-bottom:8px">비밀번호가 틀렸습니다</p>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button onclick="doLogin()" style="flex:1;padding:10px;border-radius:8px;background:#185FA5;color:#fff;border:none;cursor:pointer;font-size:14px;font-weight:700">로그인</button>
+      <button onclick="closeLogin()" style="flex:1;padding:10px;border-radius:8px;border:1px solid var(--bd);background:#f5f5f5;cursor:pointer;font-size:14px">취소</button>
     </div>
+    <p style="font-size:11px;color:#aaa;margin-top:10px;text-align:center">초기 비밀번호: admin1234</p>
   </div>
 </div>
 
@@ -254,748 +746,5 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
   <div style="font-size:12px;color:var(--m);margin-top:2px" id="tts"></div>
   <div style="font-size:11px;color:var(--acc);margin-top:4px">클릭하면 필터링</div>
 </div>
-
-<!-- 토스트 메세지 -->
-<div id="toast">알림 내용</div>
-
-<!-- xlsx 로컬 라이브러리 추가 -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-
-<!-- Firebase Module Script -->
-<script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, addDoc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-// 환경 설정 연동 및 런타임 샌드박스 대응
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'office-asset-dashboard';
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-  apiKey: "AIzaSyDX6QIgICbecDl68nb6i2Kd25Gz60ZPURo",
-  authDomain: "seoul-asset.firebaseapp.com",
-  projectId: "seoul-asset",
-  storageBucket: "seoul-asset.firebasestorage.app",
-  messagingSenderId: "579323655765",
-  appId: "1:579323655765:web:455f884c47720675a846dc"
-};
-
-// Firebase 초기화
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-
-// 전역 변수 정의
-const CAT_C={'IT기기':'#3b82f6','가구':'#a855f7','기타':'#22c55e','렌탈':'#f97316'};
-const VSTAT=['사용중','유휴','상태불량'];
-const STAT_C={'사용중':'#22c55e','유휴':'#eab308','상태불량':'#ef4444'};
-const KCAT=[{cat:'IT기기',color:'#3b82f6'},{cat:'가구',color:'#a855f7'},{cat:'기타',color:'#22c55e'},{cat:'렌탈',color:'#f97316'}];
-const VLOC=['Executive Room A','Executive Room B','Executive Room C','Executive Room D','Executive Room E','Meeting Room A','Meeting Room B','Meeting Room C','Meeting Room D','Meeting Room E','Conference Room A','업무공간1','Conference Room B','업무공간2','업무공간3','VC'];
-const VCAT=['IT기기','가구','기타','렌탈'];
-
-const KW_RULES={
-  'IT기기':  ['데스크탑','모니터','노트북','TV'],
-  '가구':    ['임원용서랍장','임원용책상','임원용의자','회의용책상','회의용의자','원형테이블의자','원형테이블','모션데스크','5단장','서랍장','책상','의자'],
-};
-
-let assets=[], logs=[], eid=null, nid=1, selIds=new Set(), sortCol=null, sortDir=1;
-let currentUser = null;
-let confirmResolve = null;
-
-// 커스텀 다이얼로그 연출 함수
-function showCustomAlert(msg, title = "알림") {
-  document.getElementById('alertTitle').textContent = title;
-  document.getElementById('alertMsg').textContent = msg;
-  document.getElementById('alertCancelBtn').style.display = 'none';
-  document.getElementById('alertOv').style.display = 'flex';
-  return new Promise((resolve) => {
-    confirmResolve = resolve;
-  });
-}
-window.showCustomAlert = showCustomAlert;
-
-function showCustomConfirm(msg, title = "확인") {
-  document.getElementById('alertTitle').textContent = title;
-  document.getElementById('alertMsg').textContent = msg;
-  document.getElementById('alertCancelBtn').style.display = 'inline-flex';
-  document.getElementById('alertOv').style.display = 'flex';
-  return new Promise((resolve) => {
-    confirmResolve = resolve;
-  });
-}
-window.showCustomConfirm = showCustomConfirm;
-
-function closeAlert(status) {
-  document.getElementById('alertOv').style.display = 'none';
-  if (confirmResolve) {
-    confirmResolve(status);
-    confirmResolve = null;
-  }
-}
-window.closeAlert = closeAlert;
-
-function showToast(m){
-  const toast = document.getElementById("toast");
-  toast.textContent = m;
-  toast.className = "show";
-  setTimeout(() => { toast.className = toast.className.replace("show", ""); }, 3000);
-}
-window.showToast = showToast;
-
-function showMsg(m){
-  const e=document.getElementById('sv');
-  if(e){
-    e.textContent=m;e.style.opacity=1;
-    setTimeout(()=>e.style.opacity=0,2200);
-  }
-}
-
-// 실시간 Firestore 로그 생성
-async function addLog(n, a, c){
-  if (!currentUser) return;
-  try {
-    const logsCol = collection(db, 'artifacts', appId, 'public', 'data', 'logs');
-    await addDoc(logsCol, {
-      n, a, c,
-      t: new Date().toTimeString().slice(0,5),
-      timestamp: Date.now()
-    });
-    showToast('저장됨 ✓');
-  } catch (err) {
-    console.error("로그 생성 에러: ", err);
-  }
-}
-
-// 데이터 동기화 시작 (인증 후 호출)
-function startFirestoreSync() {
-  if (!currentUser) return;
-
-  // 1. 자산 목록 실시간 동기화 (Strict Path)
-  const assetsCol = collection(db, 'artifacts', appId, 'public', 'data', 'assets');
-  onSnapshot(assetsCol, (snapshot) => {
-    assets = [];
-    snapshot.forEach(docSnap => {
-      assets.push({ id: docSnap.id, ...docSnap.data() });
-    });
-    
-    // 만약 데이터가 아예 없다면 초기 세팅 진행
-    if (assets.length === 0) {
-      initializeDatabase();
-    } else {
-      rAll();
-    }
-  }, (err) => {
-    console.error("자산 실시간 수신 실패: ", err);
-  });
-
-  // 2. 변경 로그 실시간 수신 (Strict Path) - 메모리 내 정렬/슬라이싱으로 복합 인덱스 요구사항 우회
-  const logsCol = collection(db, 'artifacts', appId, 'public', 'data', 'logs');
-  onSnapshot(logsCol, (snapshot) => {
-    let rawLogs = [];
-    snapshot.forEach(docSnap => {
-      rawLogs.push(docSnap.data());
-    });
-    // 최신순으로 정렬 후 30개 제한 처리
-    rawLogs.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    logs = rawLogs.slice(0, 30);
-    rL();
-  }, (err) => {
-    console.error("로그 동기화 실패: ", err);
-  });
-
-  // 3. 커스텀 타이틀 동기화
-  const configDoc = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
-  onSnapshot(configDoc, (docSnap) => {
-    if (docSnap.exists()) {
-      const data = docSnap.data();
-      if (data.title) {
-        document.getElementById('titleText').textContent = data.title;
-      }
-    }
-  }, (err) => {
-    console.error("타이틀 설정 수신 실패: ", err);
-  });
-}
-
-// 최초 실행시 목업 데이터 탑재
-async function initializeDatabase() {
-  const initial = [
-    {name: '노트북 LG Gram 17', cat: 'IT기기', loc: '업무공간1', dept: 'PBU', asn: '김민수', stat: '사용중', note: '충전기 포함'},
-    {name: '모니터 Dell 27인치 2대', cat: 'IT기기', loc: '업무공간1', dept: 'PBU', asn: '김민수', stat: '사용중', note: '듀얼 모니터 세팅'},
-    {name: '모션데스크', cat: '가구', loc: '업무공간2', dept: '총무팀', asn: '이지원', stat: '사용중', note: ''},
-    {name: '복합기 HP', cat: '렌탈', loc: '업무공간1', dept: '공용', asn: '미배정', stat: '사용중', note: '렌탈 만료일 2027-12-31'}
-  ];
-  
-  for(let i=0; i<initial.length; i++) {
-    const assetId = `AST-${String(101 + i).padStart(3, '0')}`;
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'assets', assetId), initial[i]);
-  }
-  await addLog('시스템', '초기 데모 자산 등록됨', '#22c55e');
-}
-
-// 텍스트 키워드 기반 카테고리화 처리 및 렌더링
-function parseKw(name,keywords){
-  const result={};let s=name;
-  for(const kw of keywords){
-    const re=new RegExp(kw+'(\\d+)?','g');let m;
-    while((m=re.exec(s))!==null)result[kw]=(result[kw]||0)+(m[1]?parseInt(m[1]):1);
-    s=s.replace(new RegExp(kw+'\\d*','g'),'');
-  }
-  return result;
-}
-
-function parseAuto(name){
-  const t=(name||'').trim();
-  const m=t.match(/^(.*?)\s*(\d+)$/);
-  if(m&&m[1].trim())return{label:m[1].trim(),qty:parseInt(m[2])};
-  return{label:t,qty:1};
-}
-
-function sumKw(cat){
-  const keywords=KW_RULES[cat];
-  const totals={};
-  const list=assets.filter(x=>x.cat===cat);
-  if(keywords){
-    for(const a of list)
-      for(const[kw,cnt]of Object.entries(parseKw(a.name,keywords)))totals[kw]=(totals[kw]||0)+cnt;
-  }else{
-    for(const a of list){const{label,qty}=parseAuto(a.name);totals[label]=(totals[label]||0)+qty;}
-  }
-  return totals;
-}
-
-function rAll(){
-  rK();
-  bFP();
-  rT();
-  rC();
-}
-
-async function editTitle(){
-  const span=document.getElementById('titleText');
-  const cur=span.textContent;
-  const input=document.createElement('input');
-  input.value=cur;
-  input.style.cssText='font-size:16px;font-weight:500;border:none;border-bottom:2px solid var(--acc);outline:none;background:transparent;color:var(--t);width:280px;padding:0 2px';
-  span.replaceWith(input);input.focus();input.select();
-  
-  const done=async ()=>{
-    const val=input.value.trim()||cur;
-    const newSpan=document.createElement('span');
-    newSpan.id='titleText';newSpan.textContent=val;
-    input.replaceWith(newSpan);
-    
-    if (val !== cur && currentUser) {
-      try {
-        const configDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
-        await setDoc(configDocRef, { title: val }, { merge: true });
-        showToast('제목 저장됨 ✓');
-      } catch (err) {
-        console.error("타이틀 설정 오류: ", err);
-      }
-    }
-  };
-  input.onblur=done;
-  input.onkeydown=e=>{if(e.key==='Enter')input.blur();if(e.key==='Escape'){input.value=cur;input.blur();}};
-}
-window.editTitle = editTitle;
-
-const LPOS={
-  'Executive Room A':{x:64,y:78},'Executive Room B':{x:151,y:178},'Executive Room C':{x:212,y:178},
-  'Executive Room D':{x:274,y:178},'Executive Room E':{x:336,y:178},'Meeting Room A':{x:150,y:78},
-  'Meeting Room B':{x:212,y:78},'Meeting Room C':{x:274,y:78},'Meeting Room D':{x:336,y:78},
-  'Meeting Room E':{x:842,y:68},'Conference Room A':{x:428,y:78},'Conference Room B':{x:428,y:178},
-  '업무공간1':{x:64,y:240},'업무공간2':{x:666,y:150},'업무공간3':{x:842,y:285},'VC':{x:64,y:288},
-};
-
-const FP_ZONES=[
-  {x:10,y:8,w:108,h:88,s:'#ef4444',tc:'#dc2626',ln:['Executive','Room A'],fs:8},
-  {x:121,y:8,w:59,h:88,s:'#3b82f6',tc:'#1d4ed8',ln:['Mtg.','Room A'],fs:7},
-  {x:183,y:8,w:59,h:88,s:'#3b82f6',tc:'#1d4ed8',ln:['Mtg.','Room B'],fs:7},
-  {x:245,y:8,w:59,h:88,s:'#3b82f6',tc:'#1d4ed8',ln:['Mtg.','Room C'],fs:7},
-  {x:307,y:8,w:59,h:88,s:'#3b82f6',tc:'#1d4ed8',ln:['Mtg.','Room D'],fs:7},
-  {x:369,y:8,w:118,h:88,s:'#22c55e',tc:'#15803d',ln:['Conference','Room A']},
-  {x:545,y:8,w:242,h:172,s:'#374151',tc:'#4b5563',ln:['업무공간2'],fs:12},
-  {x:792,y:8,w:100,h:75,s:'#3b82f6',tc:'#1d4ed8',ln:['Meeting','Room E']},
-  {x:10,y:99,w:108,h:160,s:'#374151',tc:'#4b5563',ln:['업무공간1'],fs:12},
-  {x:121,y:113,w:59,h:80,s:'#ef4444',tc:'#dc2626',ln:['Exec.','Room B'],fs:7},
-  {x:183,y:113,w:59,h:80,s:'#ef4444',tc:'#dc2626',ln:['Exec.','Room C'],fs:7},
-  {x:245,y:113,w:59,h:80,s:'#ef4444',tc:'#dc2626',ln:['Exec.','Room D'],fs:7},
-  {x:307,y:113,w:59,h:80,s:'#ef4444',tc:'#dc2626',ln:['Exec.','Room E'],fs:7},
-  {x:369,y:113,w:118,h:80,s:'#22c55e',tc:'#15803d',ln:['Conference','Room B']},
-  {x:792,y:185,w:100,h:118,s:'#374151',tc:'#4b5563',ln:['업무공간3'],fs:12},
-  {x:10,y:262,w:108,h:42,s:'#374151',tc:'#4b5563',ln:['VC'],fs:11},
-];
-
-function bFP(){
-  const grp={};for(const a of assets){if(!grp[a.loc])grp[a.loc]=[];grp[a.loc].push(a);}
-  let h=`<rect width="900" height="310" rx="5" fill="#dde0e8"/>`;
-  for(const z of FP_ZONES){
-    h+=`<rect x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" rx="2" fill="#fff" stroke="${z.s}" stroke-width="2.2"/>`;
-    if(z.ln.length){
-      const cx=z.x+z.w/2,cy=z.y+(z.h<60?z.h/2:18),fs=z.fs||8;
-      z.ln.forEach((l,i)=>h+=`<text x="${cx}" y="${cy+i*(fs+3)+4}" text-anchor="middle" fill="${z.tc}" font-size="${fs}" font-family="Segoe UI,sans-serif">${l}</text>`);
-    }
-  }
-  h+=`<polygon points="490,197 479,217 501,217" fill="#3b82f6" opacity=".9"/>`;
-  h+=`<text x="490" y="230" text-anchor="middle" fill="#3b82f6" font-size="8" font-weight="600" font-family="Segoe UI,sans-serif">ENTRANCE</text>`;
-  const LEG=[{c:'#ef4444',l:'Executive Room'},{c:'#3b82f6',l:'Meeting Room'},{c:'#22c55e',l:'Conference Room'},{c:'#374151',l:'업무공간'}];
-  let lx=Math.round((900-LEG.length*118)/2);
-  for(const lm of LEG){h+=`<rect x="${lx}" y="278" width="9" height="9" rx="1" fill="${lm.c}" opacity=".85"/><text x="${lx+13}" y="286" fill="#555e77" font-size="8.5" font-family="Segoe UI,sans-serif">${lm.l}</text>`;lx+=118;}
-  for(const[loc,list]of Object.entries(grp)){
-    const p=LPOS[loc];if(!p)continue;
-    const esc=loc.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-    h+=`<g class="mk" data-loc="${esc}" style="cursor:pointer"><circle cx="${p.x}" cy="${p.y}" r="15" fill="#22c55e" opacity=".15"/><circle cx="${p.x}" cy="${p.y}" r="10" fill="#22c55e" opacity=".92"/><text x="${p.x}" y="${p.y+3.5}" text-anchor="middle" fill="white" font-size="9" font-weight="700" pointer-events="none">${list.length}</text></g>`;
-  }
-  const svg=document.getElementById('fp');
-  if (svg) {
-    svg.innerHTML=h;
-    svg.onclick=e=>{const g=e.target.closest('.mk');if(g)fltr(g.dataset.loc);};
-    svg.onmousemove=e=>{
-      const g=e.target.closest('.mk');
-      if(g){
-        document.getElementById('ttn').textContent=g.dataset.loc;
-        document.getElementById('tts').textContent=`자산 ${(grp[g.dataset.loc]||[]).length}개`;
-        const t=document.getElementById('tt');t.style.left=(e.clientX+14)+'px';t.style.top=(e.clientY-14)+'px';t.classList.add('show');
-      }else document.getElementById('tt').classList.remove('show');
-    };
-    svg.onmouseleave=()=>document.getElementById('tt').classList.remove('show');
-  }
-}
-
-function rK(){
-  KCAT.forEach(({cat,color},i)=>{
-    const lst=assets.filter(a=>a.cat===cat);
-    document.getElementById('kv'+i).innerHTML='총 '+lst.length+'건';
-    const totals=sumKw(cat);
-    if(totals&&Object.keys(totals).length){
-      const sorted=Object.entries(totals).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
-      document.getElementById('kb'+i).innerHTML=sorted.slice(0, 3).map(([k,v])=>
-        `<div class="kbr"><span class="kbn">${k}</span><span class="kbv" style="color:${color}">${v}개</span></div>`).join('');
-    }else{
-      const nc={};for(const a of lst)nc[a.name]=(nc[a.name]||0)+1;
-      document.getElementById('kb'+i).innerHTML=lst.length
-        ?Object.entries(nc).slice(0,3).sort((a,b)=>b[1]-a[1]).map(([n,c])=>
-          `<div class="kbr"><span class="kbn">${n}</span><span class="kbv" style="color:${color}">${c}개</span></div>`).join('')
-        :`<span style="font-size:11px;color:var(--m);opacity:.6">등록된 자산 없음</span>`;
-    }
-  });
-}
-
-function openKpi(i){
-  const{cat,color}=KCAT[i];
-  const lst=assets.filter(a=>a.cat===cat);
-  if(!lst.length)return;
-  const totals=sumKw(cat);
-  const sorted=Object.entries(totals).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
-  const max=sorted[0]?.[1]||1;
-  const label=KW_RULES[cat]?'키워드별 수량':'품목별 수량';
-  document.getElementById('dpTitle').textContent=cat+' · 자산 현황';
-  document.getElementById('dpSub').textContent='총 자산 '+lst.length+'개 · '+label;
-  document.getElementById('dpBody').innerHTML=`
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;padding:4px 2px">
-      ${sorted.map(([name,cnt])=>`
-        <div style="background:#f8f9fb;border:1px solid var(--bd);border-radius:10px;padding:14px 16px">
-          <div style="font-size:12px;color:var(--m);margin-bottom:4px">${cat}</div>
-          <div style="font-size:14px;font-weight:700;color:var(--t);margin-bottom:6px;line-height:1.3">${name}</div>
-          <div style="font-size:30px;font-weight:800;color:${color};line-height:1;margin-bottom:8px">${cnt}<span style="font-size:13px;font-weight:500;margin-left:3px">개</span></div>
-          <div style="background:#e5e7eb;border-radius:4px;height:5px;overflow:hidden">
-            <div style="width:${Math.round(cnt/max*100)}%;height:100%;background:${color};border-radius:4px;transition:width .5s"></div>
-          </div>
-        </div>`).join('')}
-    </div>`;
-  document.getElementById('dpOv').style.display='flex';
-}
-window.openKpi = openKpi;
-
-function getVisible(){
-  const q=document.getElementById('q').value.toLowerCase(),cat=document.getElementById('fC').value;
-  return assets.filter(a=>(!q||[a.name,a.loc,a.dept,a.asn].some(v=>(v||'').toLowerCase().includes(q)))&&(!cat||a.cat===cat));
-}
-
-function toggleAll(cb){getVisible().forEach(a=>cb.checked?selIds.add(a.id):selIds.delete(a.id));document.querySelectorAll('.row-cb').forEach(b=>b.checked=cb.checked);updSel();}
-window.toggleAll = toggleAll;
-
-function toggleSel(id,cb){cb.checked?selIds.add(id):selIds.delete(id);updSel();const v=getVisible();const c=document.getElementById('cbAll');if(c)c.checked=v.length>0&&v.every(a=>selIds.has(a.id));}
-window.toggleSel = toggleSel;
-
-function updSel(){const b=document.getElementById('selBar');selIds.size?(b.classList.add('show'),document.getElementById('selCnt').textContent=selIds.size+'개 선택됨'):b.classList.remove('show');}
-
-function clrSel(){selIds.clear();document.querySelectorAll('.row-cb').forEach(b=>b.checked=false);const c=document.getElementById('cbAll');if(c)c.checked=false;updSel();}
-window.clrSel = clrSel;
-
-async function delSelected(){
-  if(!selIds.size)return;
-  const confirmDel = await showCustomConfirm(selIds.size+'개 자산을 대시보드에서 영구 삭제하시겠습니까?', '일괄 삭제');
-  if(!confirmDel) return;
-  const cnt=selIds.size;
-  try {
-    for (const id of selIds) {
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'assets', id));
-    }
-    selIds.clear();
-    await addLog(cnt+'개 자산', '일괄 삭제됨', '#ef4444');
-    clrSel();
-  } catch (err) {
-    console.error("선택 삭제 에러: ", err);
-  }
-}
-window.delSelected = delSelected;
-
-function rSummary(rows){
-  const bar=document.getElementById('summaryBar');
-  const q=document.getElementById('q').value.trim(),cat=document.getElementById('fC').value;
-  if(!rows.length||(!q&&!cat)){bar.style.display='none';return;}
-  const allKw={};
-  for(const c of VCAT){const kws=KW_RULES[c];if(kws)for(const kw of kws)allKw[kw]=CAT_C[c]||'#888';}
-  const kwList=Object.keys(allKw).sort((a,b)=>b.length-a.length);
-  const counts={};
-  for(const a of rows){
-    let s=a.name;let matched=false;
-    for(const kw of kwList){
-      const re=new RegExp(kw+'(\\d+)?','g');let m;
-      while((m=re.exec(s))!==null){counts[kw]=counts[kw]||{n:0,c:allKw[kw]};counts[kw].n+=(m[1]?parseInt(m[1]):1);matched=true;}
-      s=s.replace(new RegExp(kw+'\\d*','g'),'');
-    }
-    if(!matched){const{label,qty}=parseAuto(a.name);counts[label]=counts[label]||{n:0,c:CAT_C[a.cat]||'#888'};counts[label].n+=qty;}
-  }
-  const sorted=Object.entries(counts).filter(([,v])=>v.n>0).sort((a,b)=>b[1].n-a[1].n);
-  if(!sorted.length){bar.style.display='none';return;}
-  bar.style.display='flex';
-  bar.innerHTML=`<span style="font-size:11px;color:var(--m);white-space:nowrap;margin-right:2px">검색결과 요약</span>`
-    +sorted.map(([k,v])=>`<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;background:#fff;border:1px solid ${v.c}30;font-size:12px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:${v.c};flex-shrink:0"></span><span style="color:var(--t)">${k}</span><span style="font-weight:700;color:${v.c}">${v.n}</span></span>`).join('');
-}
-
-function setSort(col){
-  if(sortCol===col)sortDir*=-1;else{sortCol=col;sortDir=1;}
-  rT();
-}
-window.setSort = setSort;
-
-function rT(){
-  let rows=getVisible();
-  const tb=document.getElementById('tb');
-  if(!assets.length){
-    tb.innerHTML=`<tr><td colspan="10"><div class="es"><p>등록된 자산이 없습니다. 추가하거나 엑셀로 가져오세요.</p></div></td></tr>`;
-    document.querySelectorAll('th.sortable').forEach(th=>th.dataset.dir='');
-    return;
-  }
-  if(!rows.length){
-    tb.innerHTML=`<tr><td colspan="10"><div class="es"><p>검색 결과가 없습니다</p></div></td></tr>`;
-    return;
-  }
-  if(sortCol){
-    rows=[...rows].sort((a,b)=>{
-      const av=String(a[sortCol]??'');
-      const bv=String(b[sortCol]??'');
-      return av.localeCompare(bv,'ko',{numeric:true})*sortDir;
-    });
-  }
-  document.querySelectorAll('th.sortable').forEach(th=>{
-    const k=th.dataset.key;
-    th.innerHTML=th.dataset.label+(sortCol===k?(sortDir===1?' ▲':' ▼'):'<span style="opacity:.3"> ⇅</span>');
-  });
-  rSummary(rows);
-  const c=document.getElementById('cbAll');if(c)c.checked=rows.every(a=>selIds.has(a.id));
-
-  tb.innerHTML=rows.map(a=>`<tr class="${selIds.has(a.id)?'row-sel':''}" data-id="${a.id}">
-    <td><input type="checkbox" class="row-cb" ${selIds.has(a.id)?'checked':''} data-cb="${a.id}"></td>
-    <td style="color:var(--m);font-size:11px">${a.id}</td>
-    <td style="font-weight:500;white-space:normal;word-break:break-all">${a.name}</td>
-    <td style="color:${CAT_C[a.cat]||'#888'};font-size:12px">${a.cat}</td>
-    <td style="color:var(--m);font-size:12px" title="${a.loc}">${a.loc}</td>
-    <td style="color:var(--m);font-size:12px">${a.dept||'미지정'}</td>
-    <td>${a.asn}</td>
-    <td><span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;color:${STAT_C[a.stat]||'#888'};background:${STAT_C[a.stat]||'#888'}1a">${a.stat||'사용중'}</span></td>
-    <td style="color:var(--m);font-size:12px" title="${a.note||''}">${a.note||'-'}</td>
-    <td>
-      <button class="btn btn-e btn-sm" data-edit="${a.id}">수정</button>
-      <button class="btn btn-d btn-sm" style="margin-left:3px" data-del="${a.id}">삭제</button>
-    </td>
-  </tr>`).join('');
-
-  tb.onclick=function(e){
-    const editBtn=e.target.closest('[data-edit]');
-    const delBtn=e.target.closest('[data-del]');
-    const cbEl=e.target.closest('[data-cb]');
-    if(editBtn){openM(editBtn.dataset.edit);return;}
-    if(delBtn){del(delBtn.dataset.del);return;}
-    if(cbEl){toggleSel(cbEl.dataset.cb,cbEl);return;}
-  };
-}
-window.rT = rT;
-
-function rC(){
-  const tot=assets.length,empty=`<div class="es">데이터 없음</div>`;
-  if(!tot){document.getElementById('sc').innerHTML=empty;return;}
-  const depts={};for(const a of assets){const d=a.dept||'미지정';if(!depts[d])depts[d]=new Set();depts[d].add(a.asn||'미배정');}
-  const maxP=Math.max(1,...Object.values(depts).map(s=>s.size));
-  const PIN={'공용':1,'예비':2};
-  const sortedDepts=Object.entries(depts).sort((a,b)=>{
-    const pa=PIN[a[0]]||0,pb=PIN[b[0]]||0;
-    if(pa||pb)return pa-pb;
-    return b[1].size-a[1].size;
-  });
-  document.getElementById('sc').innerHTML='<div class="bl">'+sortedDepts.map(([k,s])=>`
-    <div onclick="openDept('${k.replace(/'/g,"\\'")}');event.stopPropagation()" style="cursor:pointer;border-radius:6px;padding:5px 6px;transition:background .15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background='transparent'">
-      <div class="br-lr"><span style="font-weight:500">${k}</span><span class="br-cnt">${s.size}명 ›</span></div>
-      <div class="br-tr"><div class="br-fi" style="width:${Math.round(s.size/maxP*100)}%;background:#3b82f6"></div></div>
-    </div>`).join('')+'</div>';
-}
-
-function rL(){
-  const el=document.getElementById('lg');
-  el.innerHTML=logs.length?logs.map(l=>`<div class="li"><div class="ld" style="background:${l.c}"></div><div class="lt"><b>${l.n}</b> ${l.a}</div><div class="ltm">${l.t}</div></div>`).join('')
-    :`<div class="es">변경 이력이 없습니다</div>`;
-}
-
-function openDept(dept){
-  const list=assets.filter(a=>(a.dept||'미지정')===dept);
-  const byP={};for(const a of list){const p=a.asn||'미배정';if(!byP[p])byP[p]=[];byP[p].push(a);}
-  document.getElementById('dpTitle').textContent=dept+' · 자산 현황';
-  document.getElementById('dpSub').textContent='총 '+list.length+'개 자산 · '+Object.keys(byP).length+'명';
-  document.getElementById('dpBody').innerHTML=Object.entries(byP).sort((a,b)=>b[1].length-a[1].length).map(([person,items])=>`
-    <div style="border:1px solid var(--bd);border-radius:8px;overflow:hidden;margin-bottom:10px">
-      <div style="background:#f4f6fa;padding:8px 13px;display:flex;align-items:center;justify-content:space-between">
-        <span style="font-weight:600;font-size:13px">${person}</span>
-        <span style="font-size:11px;color:var(--m);background:#fff;border:1px solid var(--bd);border-radius:12px;padding:1px 9px">${items.length}개</span>
-      </div>
-      <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">
-        <colgroup><col style="width:35%"><col style="width:18%"><col style="width:25%"><col style="width:22%"></colgroup>
-        <thead><tr>${['자산명','카테고리','위치','비고'].map(h=>`<th style="padding:6px 10px;text-align:left;color:var(--m);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--bd)">${h}</th>`).join('')}</tr></thead>
-        <tbody>${items.map((a,i)=>`<tr style="background:${i%2?'#f9fafb':'#fff'}">
-          <td style="padding:7px 10px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.name}">${a.name}</td>
-          <td style="padding:7px 10px;color:${CAT_C[a.cat]||'#888'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.cat}</td>
-          <td style="padding:7px 10px;color:var(--m);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.loc}">${a.loc}</td>
-          <td style="padding:7px 10px;color:var(--m);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.note||''}">${a.note||'-'}</td>
-        </tr>`).join('')}</tbody>
-      </table>
-    </div>`).join('');
-  document.getElementById('dpOv').style.display='flex';
-}
-window.openDept = openDept;
-
-function closeDept(){document.getElementById('dpOv').style.display='none';}
-window.closeDept = closeDept;
-
-function openM(id=null){
-  eid=id;
-  const a=id!=null?assets.find(x=>String(x.id)===String(id)):null;
-  document.getElementById('mt').textContent=a?'자산 수정':'자산 추가';
-  document.getElementById('fn').value=a?.name??'';
-  document.getElementById('fid').value=a?.id??'';
-  document.getElementById('fc').value=a?.cat??'IT기기';
-  document.getElementById('fl').value=a?.loc??'업무공간1';
-  document.getElementById('fdept').value=a?.dept&&a.dept!=='미지정'?a.dept:'';
-  document.getElementById('fa').value=a?.asn&&a.asn!=='미배정'?a.asn:'';
-  document.getElementById('fstat').value=a?.stat??'사용중';
-  document.getElementById('fnote').value=a?.note??'';
-  document.getElementById('ov').style.display='flex';
-}
-window.openM = openM;
-
-function closeM(){document.getElementById('ov').style.display='none';eid=null;}
-window.closeM = closeM;
-
-async function save(){
-  const name=document.getElementById('fn').value.trim();
-  if(!name){
-    await showCustomAlert('자산명을 반드시 입력해주셔야 합니다.');
-    return;
-  }
-  const d={
-    name,
-    cat:document.getElementById('fc').value,
-    loc:document.getElementById('fl').value,
-    dept:document.getElementById('fdept').value.trim()||'미지정',
-    asn:document.getElementById('fa').value.trim()||'미배정',
-    stat:document.getElementById('fstat').value,
-    note:document.getElementById('fnote').value.trim()
-  };
-  
-  try {
-    if(eid!=null){
-      // 수정 (Strict Doc Path)
-      const assetDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'assets', eid);
-      await setDoc(assetDocRef, d, { merge: true });
-      await addLog(name,'수정됨','#3b82f6');
-    }else{
-      // 신규 등록
-      const rawId=document.getElementById('fid').value.trim();
-      let newId = rawId;
-      if(!rawId || assets.find(a=>String(a.id)===rawId)) {
-        newId = 'AST-' + String(nid++).padStart(3, '0');
-        // ID 순차 증가 중복 방지 체크
-        while(assets.find(a=>String(a.id)===newId)){
-          newId = 'AST-' + String(nid++).padStart(3, '0');
-        }
-      }
-      const assetDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'assets', newId);
-      await setDoc(assetDocRef, d);
-      await addLog(name,'등록됨','#22c55e');
-    }
-    closeM();
-  } catch (err) {
-    console.error("자산 저장 에러: ", err);
-    await showCustomAlert('저장 중 데이터베이스 에러가 발생했습니다.');
-  }
-}
-window.save = save;
-
-async function del(id){
-  const a=assets.find(x=>String(x.id)===String(id));
-  if(!a) return;
-  const confirmDel = await showCustomConfirm(`"${a.name}"을(를) 영구 삭제하시겠습니까?`, '자산 제거');
-  if(!confirmDel) return;
-  
-  try {
-    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'assets', id));
-    selIds.delete(id);
-    updSel();
-    await addLog(a.name, '삭제됨', '#ef4444');
-  } catch (err) {
-    console.error("자산 삭제 실패: ", err);
-  }
-}
-window.del = del;
-
-function fltr(loc){document.getElementById('q').value=loc;document.getElementById('fC').value='';clrSel();rT();}
-window.fltr = fltr;
-
-function clrF(){document.getElementById('q').value='';document.getElementById('fC').value='';clrSel();rT();}
-window.clrF = clrF;
-
-function exportXL(){
-  if(!assets.length){
-    showCustomAlert('내보낼 자산 데이터가 대시보드에 존재하지 않습니다.');
-    return;
-  }
-  const ws=XLSX.utils.json_to_sheet(assets.map(a=>({'ID':a.id,'자산명':a.name,'카테고리':a.cat,'위치':a.loc,'부서':a.dept||'미지정','담당자':a.asn,'상태':a.stat||'사용중','비고':a.note||''})));
-  ws['!cols']=[{wch:12},{wch:24},{wch:12},{wch:22},{wch:14},{wch:14},{wch:10},{wch:24}];
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'자산현황');
-  XLSX.writeFile(wb,'자산현황_'+new Date().toISOString().slice(0,10)+'.xlsx');
-  addLog(assets.length+'개 자산','엑셀 내보내기','#3b82f6');
-}
-window.exportXL = exportXL;
-
-// 엑셀 분석 및 Firestore 배치 삽입 고도화 (Promise.all 일괄 실행)
-async function importXL(input){
-  const file=input.files[0];if(!file)return;
-  const reader=new FileReader();
-  reader.onload=async e=>{
-    try{
-      const wb=XLSX.read(e.target.result,{type:'array'});
-      const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});
-      if(!rows.length){
-        await showCustomAlert('가져온 엑셀 파일 내 자산 정보가 비어있습니다.');
-        return;
-      }
-      let added=0,skip=0;
-      const promises = [];
-      
-      for(const r of rows){
-        const name=String(r['자산명']||'').trim();if(!name){skip++;continue;}
-        const rawId=String(r['ID']||'').trim();
-        let newId=rawId&&!assets.find(a=>String(a.id)===rawId)?rawId:('AST-' + String(nid++).padStart(3, '0'));
-        
-        while(assets.find(a=>String(a.id)===newId)){
-          nid++;
-          newId = 'AST-' + String(nid).padStart(3, '0');
-        }
-
-        const loc=String(r['위치']||'업무공간1').trim();
-        const cat=String(r['카테고리']||'기타').trim();
-        const stat=String(r['상태']||'사용중').trim();
-        
-        const assetDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'assets', newId);
-        promises.push(setDoc(assetDocRef, {
-          name,
-          cat:VCAT.includes(cat)?cat:'기타',
-          loc:VLOC.includes(loc)?loc:'업무공간1',
-          dept:String(r['부서']||'미지정').trim()||'미지정',
-          asn:String(r['담당자']||'미배정').trim()||'미배정',
-          stat:VSTAT.includes(stat)?stat:'사용중',
-          note:String(r['비고']||'').trim()
-        }));
-        added++;
-      }
-      
-      if (promises.length > 0) {
-        await Promise.all(promises);
-        await addLog(added+'개 자산','일괄 등록됨','#22c55e');
-        await showCustomAlert(`${added}개 자산 등록 완료` + (skip ? ` (${skip}개 누락)` : ''), '가져오기 완료');
-      } else {
-        await showCustomAlert('유효한 자산 데이터가 없습니다.');
-      }
-    }catch(err){
-      await showCustomAlert('엑셀 분석 중 오류 발생: '+err.message);
-    }
-    input.value='';
-  };
-  reader.readAsArrayBuffer(file);
-}
-window.importXL = importXL;
-
-function dlTpl(){
-  const ws=XLSX.utils.aoa_to_sheet([['ID','자산명','카테고리','위치','부서','담당자','상태','비고'],['AST-001','복합기','기타','업무공간1','총무팀','홍길동','사용중','2층 프린터실'],['AST-002','소파 세트','가구','Conference Room A','PBU','김철수','유휴','']]);
-  ws['!cols']=[{wch:12},{wch:22},{wch:12},{wch:28},{wch:14},{wch:14},{wch:10},{wch:24}];
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'자산현황');XLSX.writeFile(wb,'자산현황_템플릿.xlsx');
-}
-window.dlTpl = dlTpl;
-
-function saveAsHTML(){
-  let src='<!DOCTYPE html>\n<html lang="ko">\n<head>\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n<title>사무실 자산현황 대시보드</title>\n</head>\n<body>\n'
-    +document.body.innerHTML+'\n</body>\n</html>';
-  const sc='scr'+'ipt';
-  const dataSnippet='<'+sc+'>window.__SD__='+JSON.stringify({assets,logs,nid}).replace(/<\/script>/gi,'<\\/script>')+';<\/'+sc+'>';
-  src=src.replace('<body>\n','<body>\n'+dataSnippet+'\n');
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([src],{type:'text/html;charset=utf-8'}));
-  a.download='자산현황_'+new Date().toISOString().slice(0,10)+'.html';
-  a.click();
-  URL.revokeObjectURL(a.href);
-  showToast('HTML 다운로드 성공 ✓');
-}
-window.saveAsHTML = saveAsHTML;
-
-// 초기 인증 핸들러 (Strict Rule 3: Auth Before Query)
-async function initAuth() {
-  if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-    await signInWithCustomToken(auth, __initial_auth_token);
-  } else {
-    await signInAnonymously(auth);
-  }
-}
-
-// 초기 로딩 진입점
-window.onload = function() {
-  initAuth();
-  
-  // 엑셀 바인딩 구조 개선
-  const exInput = document.getElementById('excelInput');
-  if (exInput) {
-    exInput.addEventListener('change', function(e) {
-      importXL(e.target);
-    });
-  }
-
-  // 실시간 시계 연동
-  (function tick(){
-    const n=new Date();
-    document.getElementById('clk').textContent=n.toTimeString().slice(0,8);
-    document.getElementById('dt').textContent=n.toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'short'});
-    setTimeout(tick,1000);
-  })();
-};
-
-// 인증 세션 상태 리스너
-onAuthStateChanged(auth, (user) => {
-  if (user) {
-    currentUser = user;
-    document.getElementById('userStatus').textContent = `UID: ${user.uid.slice(0, 8)}`;
-    startFirestoreSync();
-  } else {
-    document.getElementById('userStatus').textContent = '세션 연결 끊김';
-  }
-});
-</script>
 </body>
 </html>
