@@ -129,9 +129,9 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
         </div>
       </div>
       <div class="tb">
-        <input class="sb" id="q" type="text" placeholder="자산명, 위치, 부서, 담당자 검색..." oninput="rT()">
+        <input class="sb" id="q" type="text" placeholder="자산명, 위치, 부서, 담당자 검색..." oninput="onSearch(this.value)" style="max-width:340px;">
         <select class="fs" id="fC" onchange="rT()"><option value="">전체 카테고리</option><option>IT기기</option><option>가구</option><option>기타</option><option>렌탈</option></select>
-        <button class="btn btn-c btn-sm" onclick="clrF()"><i class="ti ti-refresh"></i></button>
+        <button class="btn btn-c btn-sm" onclick="clrF()" style="white-space:nowrap;">↺ 리셋</button>
       </div>
       <div class="tb2">
         <label id="importBtn" class="file-btn" style="display:none"><i class="ti ti-upload"></i> 엑셀 가져오기<input type="file" accept=".xlsx,.xls" onchange="importXL(this)"></label>
@@ -501,6 +501,10 @@ window.del=async function(firestoreId){
   await loadAssets();await addLog(a.name,'삭제됨','#ef4444');rAll();
 };
 window.fltr=function(loc){document.getElementById('q').value=loc;document.getElementById('fC').value='';clrSel();rT();};
+window.onSearch = function(v) {
+  document.getElementById('q').value = v;
+  rT();
+};  
 window.clrF=function(){document.getElementById('q').value='';document.getElementById('fC').value='';clrSel();rT();};
 
 // ── 엑셀 ──────────────────────────────────────────────────────
